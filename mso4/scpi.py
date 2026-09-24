@@ -477,6 +477,15 @@ class MSO4Client:
             "reported_points": int(transfer_points),
             "record_length": int(record_length) if record_length else None,
             "xincr": float(pre.xincr),
+            "xzero": float(pre.xzero),
+            "pt_off": float(pre.pt_off),
+            "ymult": float(pre.ymult),
+            "yzero": float(pre.yzero),
+            "yoff": float(pre.yoff),
+            "time_start": float(x[0]) if n else None,
+            "time_stop": float(x[-1]) if n else None,
+            "voltage_min": float(np.min(y)) if n else None,
+            "voltage_max": float(np.max(y)) if n else None,
         }
 
         return Waveform(channel=ch, time_s=x, volts=y)
