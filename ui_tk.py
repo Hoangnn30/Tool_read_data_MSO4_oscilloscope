@@ -13,6 +13,8 @@ from typing import Optional
 import numpy as np
 
 from mso4 import MSO4Client
+from connection_ui import ConnectionManagerDialog
+from instrumentation import ConnectionType, DeviceConfig, DeviceRegistry, DeviceStatus
 
 
 CHANNEL_COLORS = {
@@ -82,6 +84,11 @@ class MSO4ScopeApp:
         self.root.resizable(False, False)
         self.root.configure(bg="#070B10")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self.registry = DeviceRegistry()
+        self.active_device_var = tk.StringVar(value="")
+        self.device_status_var = tk.StringVar(value="No active device")
+        self._seed_default_device()
 
         self.client: Optional[MSO4Client] = None
         self.acq_thread: Optional[threading.Thread] = None
@@ -301,7 +308,9 @@ class MSO4ScopeApp:
         )
 
     def _build_ui(self) -> None:
+        self._build_menu()
         self._build_topbar()
+        self._build_device_toolbar()
 
         # Fixed three-column layout: no draggable sash, no side-panel scrolling.
         body = tk.Frame(self.root, bg="#070B10")
@@ -345,6 +354,262 @@ class MSO4ScopeApp:
             anchor="e",
             font=("Arial", 9),
         ).pack(side="right", padx=8, pady=4)
+
+    def _seed_default_device(self) -> None:
+        if self.registry.devices:
+            return
+        try:
+            self.registry.upsert(
+                DeviceConfig(
+                    name="MSO44B-1",
+                    model="Tektronix MSO44B",
+                    connection_type=ConnectionType.VISA_TCPIP,
+                    ip="192.168.1.133",
+                )
+            )
+        except Exception:
+            pass
+
+    def _build_menu(self) -> None:
+        menu = tk.Menu(self.root)
+
+        file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(label="Save Data...", command=self._save_csv)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+        menu.add_cascade(label="File", menu=file_menu)
+
+        edit_menu = tk.Menu(menu, tearoff=False)
+        edit_menu.add_command(label="Scope View", command=self._autoscale)
+        edit_menu.add_command(label="Refresh Device Settings", command=self._refresh_settings)
+        menu.add_cascade(label="Edit", menu=edit_menu)
+
+        tools_menu = tk.Menu(menu, tearoff=False)
+        tools_menu.add_command(label="Get Data", command=self._focus_get_data)
+        tools_menu.add_command(label="4 Channel Stack", command=self._stack_four_channels)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="SCPI Console", command=lambda: self.scpi_entry.focus_set())
+        menu.add_cascade(label="Tools", menu=tools_menu)
+
+        connection_menu = tk.Menu(menu, tearoff=False)
+        connection_menu.add_command(
+            label="Manage Devices...",
+            command=self._open_connection_manager,
+        )
+        connection_menu.add_command(
+            label="Connect Active Device",
+            command=self._connect_active_device,
+        )
+        connection_menu.add_command(
+            label="Disconnect Active Device",
+            command=self._disconnect_active_device,
+        )
+        connection_menu.add_separator()
+        connection_menu.add_command(
+            label="Disconnect All",
+            command=self._disconnect_all_devices,
+        )
+        menu.add_cascade(label="Connection", menu=connection_menu)
+
+        automation_menu = tk.Menu(menu, tearoff=False)
+        automation_menu.add_command(
+            label="Automation Test...",
+            command=self._show_automation_placeholder,
+        )
+        automation_menu.add_command(
+            label="IC Profiles...",
+            command=self._show_profile_placeholder,
+        )
+        menu.add_cascade(label="Automation", menu=automation_menu)
+
+        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu.add_command(label="About", command=self._show_about)
+        menu.add_cascade(label="Help", menu=help_menu)
+
+        self.root.config(menu=menu)
+
+    def _build_device_toolbar(self) -> None:
+        bar = tk.Frame(
+            self.root,
+            bg="#0B1118",
+            highlightbackground="#223240",
+            highlightthickness=1,
+            height=38,
+        )
+        bar.pack(fill="x", padx=10, pady=(0, 4))
+        bar.pack_propagate(False)
+
+        tk.Label(
+            bar,
+            text="ACTIVE DEVICE",
+            bg="#0B1118",
+            fg="#8094A7",
+            font=("Arial", 8, "bold"),
+        ).pack(side="left", padx=(10, 5))
+
+        self.device_combo = ttk.Combobox(
+            bar,
+            textvariable=self.active_device_var,
+            state="readonly",
+            width=30,
+            style="Dark.TCombobox",
+        )
+        self.device_combo.pack(side="left", padx=3, pady=5)
+        self.device_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._active_device_changed(),
+        )
+
+        self.device_status_label = tk.Label(
+            bar,
+            textvariable=self.device_status_var,
+            bg="#18212A",
+            fg="#8392A0",
+            font=("Arial", 8, "bold"),
+            padx=8,
+            pady=4,
+        )
+        self.device_status_label.pack(side="left", padx=6)
+
+        ttk.Button(
+            bar,
+            text="CONNECTIONS",
+            command=self._open_connection_manager,
+            style="Dark.TButton",
+        ).pack(side="right", padx=5, pady=4)
+
+        ttk.Button(
+            bar,
+            text="GET DATA",
+            command=self._get_data_once,
+            style="Action.TButton",
+        ).pack(side="right", padx=3, pady=4)
+
+        self._refresh_device_selector()
+
+    def _open_connection_manager(self) -> None:
+        ConnectionManagerDialog(
+            self.root,
+            self.registry,
+            on_changed=self._refresh_device_selector,
+        )
+
+    def _refresh_device_selector(self) -> None:
+        online = self.registry.online_devices()
+        names = [device.name for device in online]
+        if hasattr(self, "device_combo"):
+            self.device_combo.configure(values=names)
+
+        current = self.active_device_var.get()
+        if current not in names:
+            self.active_device_var.set(names[0] if names else "")
+
+        self._active_device_changed()
+
+    def _active_device_changed(self) -> None:
+        name = self.active_device_var.get().strip()
+        if not name:
+            self.device_status_var.set("No online device")
+            if hasattr(self, "device_status_label"):
+                self.device_status_label.configure(bg="#24191B", fg="#A9797E")
+            return
+
+        config = self.registry.get(name)
+        driver = self.registry.get_driver(name)
+        status = self.registry.get_status(name)
+
+        if config is None or driver is None or status != DeviceStatus.ONLINE:
+            self.device_status_var.set(f"{name} • OFFLINE")
+            return
+
+        self.device_status_var.set(f"{name} • ONLINE • {config.model}")
+        if hasattr(self, "device_status_label"):
+            self.device_status_label.configure(bg="#11271B", fg="#67D795")
+
+        # Existing scope UI can immediately reuse the connected MSO client.
+        client = getattr(driver, "client", None)
+        if client is not None:
+            self.client = client
+            self.ip_var.set(config.ip)
+            self.connect_btn.configure(text="DISCONNECT", state="normal")
+            self.run_btn.configure(state="normal")
+            self.single_btn.configure(state="normal")
+            self.get_data_btn.configure(state="normal")
+            self.autoset_btn.configure(state="normal")
+            self.default_btn.configure(state="normal")
+            self.scpi_btn.configure(state="normal")
+            self.connection_badge_var.set("● ONLINE")
+            self.connection_badge.configure(bg="#10271C", fg="#6DDB9E")
+            self.status_var.set(f"Active device: {name}")
+            try:
+                settings = client.get_scope_settings()
+                self._apply_settings_to_ui(settings)
+            except Exception:
+                pass
+        else:
+            self.status_var.set(
+                f"{config.model}: generic Get Data UI will use device capabilities."
+            )
+
+    def _connect_active_device(self) -> None:
+        name = self.active_device_var.get().strip()
+        if not name:
+            devices = self.registry.devices
+            if not devices:
+                self._open_connection_manager()
+                return
+            name = devices[0].name
+
+        self.status_var.set(f"Connecting {name}...")
+
+        def worker() -> None:
+            try:
+                self.registry.connect(name)
+                self.command_queue.put(("registry_changed", name, None))
+            except Exception as exc:
+                self.command_queue.put(("registry_changed", name, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _disconnect_active_device(self) -> None:
+        name = self.active_device_var.get().strip()
+        if not name:
+            return
+        self.registry.disconnect(name)
+        if self.client and not self.registry.get_driver(name):
+            self.client = None
+        self._refresh_device_selector()
+        self.status_var.set(f"{name}: disconnected")
+
+    def _disconnect_all_devices(self) -> None:
+        self.registry.disconnect_all()
+        self.client = None
+        self._refresh_device_selector()
+        self.status_var.set("All devices disconnected")
+
+    def _focus_get_data(self) -> None:
+        if not self.registry.online_devices():
+            self._open_connection_manager()
+            return
+        self._get_data_once()
+
+    def _show_automation_placeholder(self) -> None:
+        messagebox.showinfo(
+            "Automation Test",
+            "Automation engine is installed. Next UI will contain test sequence, IC profile, run/stop, live log and PASS/FAIL results.",
+        )
+
+    def _show_profile_placeholder(self) -> None:
+        messagebox.showinfo(
+            "IC Profiles",
+            "IC-specific voltages, channel mapping, timing and limits will be stored in profiles so test scripts do not need to change when the IC changes.",
+        )
+
+    def _show_about(self) -> None:
+        messagebox.showinfo(
+            "About",
+            "Instrument Automation Test Platform\nMulti-device connection, Get Data and reusable test automation.",
+        )
 
     def _build_topbar(self) -> None:
         top = ttk.Frame(self.root, style="Dark.TFrame", padding=(12, 9))
@@ -1980,6 +2245,16 @@ class MSO4ScopeApp:
                     self._apply_settings_to_ui(settings)
                     self._redraw_scope()
 
+                elif kind == "registry_changed":
+                    _, name, error = msg
+                    self._refresh_device_selector()
+                    if error:
+                        self.status_var.set(f"{name}: connection error")
+                        messagebox.showerror("Connection", error)
+                    else:
+                        self.active_device_var.set(name)
+                        self._active_device_changed()
+
                 elif kind == "connect_error":
                     self.connect_btn.configure(state="normal")
                     self.status_var.set("Connection failed")
@@ -2456,6 +2731,11 @@ class MSO4ScopeApp:
     def _on_close(self) -> None:
         self._closing = True
         self.stop_event.set()
+
+        try:
+            self.registry.disconnect_all()
+        except Exception:
+            pass
 
         if self.client:
             try:
