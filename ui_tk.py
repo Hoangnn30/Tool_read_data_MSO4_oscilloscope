@@ -950,11 +950,18 @@ class MSO4ScopeApp:
             messagebox.showinfo("MSO4", "Enable at least one channel.")
             return
 
+        try:
+            points = max(500, int(self.points_var.get()))
+        except ValueError:
+            points = 5000
+
+        self.stop_event.clear()
+
         def worker() -> None:
             try:
                 self.client.single_acquisition()
                 time.sleep(0.08)
-                self._acquire_one_frame(channels)
+                self._acquire_one_frame(channels, points)
                 self.command_queue.put(("single_done",))
             except Exception as exc:
                 self.command_queue.put(("acq_error", f"Single: {exc}"))
@@ -1016,6 +1023,7 @@ class MSO4ScopeApp:
             points = max(500, int(self.points_var.get()))
             refresh_ms = max(20, int(self.refresh_var.get()))
             fast_record = max(points, int(self.fast_record_var.get()))
+            fast_mode = bool(self.fast_mode_var.get())
         except ValueError:
             messagebox.showwarning(
                 "Acquisition",
@@ -1035,7 +1043,7 @@ class MSO4ScopeApp:
             try:
                 self.client.prepare_acquisition(
                     channels,
-                    fast_record_length=(fast_record if self.fast_mode_var.get() else None),
+                    fast_record_length=(fast_record if fast_mode else None),
                 )
                 record_length = self.client.get_record_length()
                 self.command_queue.put(("prepared", record_length))
@@ -1048,7 +1056,7 @@ class MSO4ScopeApp:
 
             while not self.stop_event.is_set():
                 started = time.monotonic()
-                successful = self._acquire_one_frame(channels)
+                successful = self._acquire_one_frame(channels, points)
 
                 if successful == 0:
                     errors = " | ".join(
@@ -1077,12 +1085,7 @@ class MSO4ScopeApp:
         self.acq_thread = threading.Thread(target=worker, daemon=True)
         self.acq_thread.start()
 
-    def _acquire_one_frame(self, channels: list[str]) -> int:
-        try:
-            points = max(500, int(self.points_var.get()))
-        except ValueError:
-            points = 5000
-
+    def _acquire_one_frame(self, channels: list[str], points: int) -> int:
         successful = 0
 
         for ch in channels:
