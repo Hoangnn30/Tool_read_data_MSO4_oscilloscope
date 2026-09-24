@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -284,6 +285,27 @@ class MSO4Client:
     def single_acquisition(self) -> None:
         self.write("ACQUIRE:STOPAFTER SEQUENCE")
         self.write("ACQUIRE:STATE RUN")
+
+    def get_acquisition_state(self) -> str:
+        return self.query("ACQUIRE:STATE?")
+
+    def wait_for_acquisition_complete(self, timeout: float = 3.0) -> bool:
+        """Wait for a SEQUENCE/SINGLE acquisition to stop.
+
+        Returns True when ACQUIRE:STATE reports stopped, False on timeout.
+        """
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        while time.monotonic() < deadline:
+            raw = self.get_acquisition_state().strip().upper()
+            try:
+                value = self._parse_number(raw)
+                if int(round(value)) == 0:
+                    return True
+            except ValueError:
+                if raw.endswith("STOP") or raw == "OFF":
+                    return True
+            time.sleep(0.02)
+        return False
 
     def autoset(self) -> None:
         self.write("AUTOSET EXECUTE")
