@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from mso4 import MSO4Client
+from mso4 import MSO4Client, TekHSIUnavailable, TekHSIWaveformClient
 from connection_ui import ConnectionManagerDialog
 from instrumentation import ConnectionType, DeviceConfig, DeviceRegistry, DeviceStatus
 
@@ -91,6 +91,8 @@ class MSO4ScopeApp:
         self._seed_default_device()
 
         self.client: Optional[MSO4Client] = None
+        self.hsi_client: Optional[TekHSIWaveformClient] = None
+        self.waveform_transport = "SCPI"
         self.acq_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self._acq_generation = 0
@@ -1283,7 +1285,10 @@ class MSO4ScopeApp:
                 client = MSO4Client(host, timeout=6.0)
                 idn = client.connect()
                 settings = client.get_scope_settings()
-                self.command_queue.put(("connected", client, idn, settings))
+                hsi = TekHSIWaveformClient(host, port=5000)
+                self.command_queue.put(
+                    ("connected", client, hsi, idn, settings)
+                )
             except Exception as exc:
                 self.command_queue.put(("connect_error", str(exc)))
 
@@ -1291,6 +1296,14 @@ class MSO4ScopeApp:
 
     def _disconnect(self) -> None:
         self._stop_acquisition(local_only=True)
+
+        hsi = self.hsi_client
+        self.hsi_client = None
+        if hsi:
+            try:
+                hsi.close()
+            except Exception:
+                pass
 
         client = self.client
         self.client = None
@@ -2417,8 +2430,9 @@ class MSO4ScopeApp:
                 kind = msg[0]
 
                 if kind == "connected":
-                    _, client, idn, settings = msg
+                    _, client, hsi, idn, settings = msg
                     self.client = client
+                    self.hsi_client = hsi
                     self.connect_btn.configure(text="DISCONNECT", state="normal")
                     self.run_btn.configure(state="normal")
                     self.single_btn.configure(state="normal")
@@ -2427,7 +2441,11 @@ class MSO4ScopeApp:
                     self.default_btn.configure(state="normal")
                     self.scpi_btn.configure(state="normal")
                     self.ip_entry.configure(state="disabled")
-                    self.status_var.set(f"Connected: {idn}")
+                    hsi_ready = TekHSIWaveformClient.available()
+                    self.waveform_transport = "TekHSI" if hsi_ready else "SCPI"
+                    self.status_var.set(
+                        f"Connected: {idn} | waveform: {self.waveform_transport}"
+                    )
                     self.connection_badge_var.set("● ONLINE")
                     self.connection_badge.configure(bg="#10271C", fg="#6DDB9E")
                     self.scpi_result_var.set(idn)
@@ -2958,6 +2976,12 @@ class MSO4ScopeApp:
             self.registry.disconnect_all()
         except Exception:
             pass
+
+        if self.hsi_client:
+            try:
+                self.hsi_client.close()
+            except Exception:
+                pass
 
         if self.client:
             try:
