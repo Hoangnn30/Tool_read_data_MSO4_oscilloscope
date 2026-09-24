@@ -469,6 +469,7 @@ class MSO4Client:
             resample = max(1, int(np.ceil(record_length / desired_points)))
 
             inst.write(f"DATA:SOURCE {ch}")
+            inst.write("DATA:MODE VECTOR")
             inst.write(f"DATA:START {data_start}")
             inst.write(f"DATA:STOP {data_stop}")
             inst.write(f"DATA:RESAMPLE {resample}")
@@ -521,6 +522,7 @@ class MSO4Client:
             inst = self._require_instrument()
             try:
                 inst.write(f"DATA:SOURCE {ch}")
+                inst.write("DATA:MODE VECTOR")
                 # Re-assert resample because DATA settings are global and another
                 # transfer mode may have changed them.
                 inst.write(f"DATA:START {int(cached['data_start'])}")
@@ -544,6 +546,7 @@ class MSO4Client:
 
                 inst = self._require_instrument()
                 inst.write(f"DATA:SOURCE {ch}")
+                inst.write("DATA:MODE VECTOR")
                 inst.write(f"DATA:START {int(cached['data_start'])}")
                 inst.write(f"DATA:STOP {int(cached['data_stop'])}")
                 inst.write(f"DATA:RESAMPLE {resample}")
@@ -569,6 +572,7 @@ class MSO4Client:
 
         self._last_transfer_info[ch] = {
             "mode": "FAST-RESAMPLE",
+            "byte_width": 1,
             "points": int(n),
             "reported_points": int(transfer_points),
             "record_length": int(record_length),
@@ -639,6 +643,7 @@ class MSO4Client:
 
         self._last_transfer_info[ch] = {
             "mode": mode,
+            "byte_width": (2 if mode == "BINARY" else None),
             "points": int(n),
             "reported_points": int(transfer_points),
             "record_length": int(record_length) if record_length else None,
@@ -665,13 +670,16 @@ class MSO4Client:
         encoding: str,
     ) -> tuple[WaveformPreamble, int]:
         inst.write(f"DATA:SOURCE {ch}")
+        inst.write("DATA:MODE VECTOR")
         inst.write(f"DATA:START {start}")
         inst.write(f"DATA:STOP {stop}")
         inst.write("DATA:RESAMPLE 1")
 
         if encoding == "BINARY":
+            # Exact capture uses 16-bit signed samples so GET DATA/SINGLE
+            # preserve vertical digitizer resolution better than the fast UI path.
             inst.write("DATA:ENCDG RIBINARY")
-            inst.write("DATA:WIDTH 1")
+            inst.write("DATA:WIDTH 2")
         else:
             inst.write("DATA:ENCDG ASCII")
 
@@ -702,7 +710,7 @@ class MSO4Client:
 
         samples = inst.query_binary_values(
             "CURVE?",
-            datatype="b",
+            datatype="h",
             is_big_endian=True,
             container=np.array,
         )
