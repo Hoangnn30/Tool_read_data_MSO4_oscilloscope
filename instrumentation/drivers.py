@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import socket
 import pyvisa
+import serial
 
 from mso4 import MSO4Client
 
@@ -168,10 +170,145 @@ class GenericVisaScpiDriver(InstrumentDriver):
             return raw
 
 
+
+
+class TcpSocketScpiDriver(InstrumentDriver):
+    capabilities = frozenset({"raw_scpi", "scalar_read"})
+
+    def __init__(self, config: DeviceConfig):
+        super().__init__(config)
+        self._socket: socket.socket | None = None
+
+    def connect(self) -> str:
+        if not self.config.ip or not self.config.port:
+            raise ValueError("TCP Socket requires IP and port.")
+        self.status = DeviceStatus.CONNECTING
+        try:
+            self._socket = socket.create_connection(
+                (self.config.ip, int(self.config.port)),
+                timeout=self.config.timeout_s,
+            )
+            self._socket.settimeout(self.config.timeout_s)
+            try:
+                self.idn = self.query("*IDN?")
+            except Exception:
+                self.idn = self.config.model
+            self.status = DeviceStatus.ONLINE
+            return self.idn
+        except Exception:
+            self.status = DeviceStatus.ERROR
+            self.disconnect()
+            self.status = DeviceStatus.ERROR
+            raise
+
+    def disconnect(self) -> None:
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+        self._socket = None
+        if self.status != DeviceStatus.ERROR:
+            self.status = DeviceStatus.OFFLINE
+
+    def write(self, command: str) -> None:
+        if self._socket is None:
+            raise RuntimeError("Device is not connected.")
+        self._socket.sendall((command.rstrip("\r\n") + "\n").encode("ascii"))
+
+    def query(self, command: str) -> str:
+        self.write(command)
+        if self._socket is None:
+            raise RuntimeError("Device is not connected.")
+        data = bytearray()
+        while True:
+            chunk = self._socket.recv(4096)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if b"\n" in chunk:
+                break
+        return data.decode(errors="replace").strip()
+
+    def get_data(self, **kwargs) -> Any:
+        command = str(kwargs.get("command", "READ?"))
+        raw = self.query(command)
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+
+
+class SerialScpiDriver(InstrumentDriver):
+    capabilities = frozenset({"raw_scpi", "scalar_read"})
+
+    def __init__(self, config: DeviceConfig):
+        super().__init__(config)
+        self._serial: serial.Serial | None = None
+
+    def connect(self) -> str:
+        if not self.config.com_port:
+            raise ValueError("Serial COM requires a port.")
+        self.status = DeviceStatus.CONNECTING
+        try:
+            self._serial = serial.Serial(
+                port=self.config.com_port,
+                baudrate=int(self.config.baud_rate),
+                timeout=self.config.timeout_s,
+                write_timeout=self.config.timeout_s,
+            )
+            try:
+                self.idn = self.query("*IDN?")
+            except Exception:
+                self.idn = self.config.model
+            self.status = DeviceStatus.ONLINE
+            return self.idn
+        except Exception:
+            self.status = DeviceStatus.ERROR
+            self.disconnect()
+            self.status = DeviceStatus.ERROR
+            raise
+
+    def disconnect(self) -> None:
+        if self._serial is not None:
+            try:
+                self._serial.close()
+            except Exception:
+                pass
+        self._serial = None
+        if self.status != DeviceStatus.ERROR:
+            self.status = DeviceStatus.OFFLINE
+
+    def write(self, command: str) -> None:
+        if self._serial is None:
+            raise RuntimeError("Device is not connected.")
+        self._serial.write((command.rstrip("\r\n") + "\n").encode("ascii"))
+        self._serial.flush()
+
+    def query(self, command: str) -> str:
+        self.write(command)
+        if self._serial is None:
+            raise RuntimeError("Device is not connected.")
+        return self._serial.readline().decode(errors="replace").strip()
+
+    def get_data(self, **kwargs) -> Any:
+        command = str(kwargs.get("command", "READ?"))
+        raw = self.query(command)
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+
 def create_driver(config: DeviceConfig) -> InstrumentDriver:
     model = config.model.upper()
 
     if "MSO44" in model or "MSO24" in model:
         return MSO4InstrumentDriver(config)
+
+    if config.connection_type == ConnectionType.TCP_SOCKET:
+        return TcpSocketScpiDriver(config)
+
+    if config.connection_type == ConnectionType.SERIAL:
+        return SerialScpiDriver(config)
 
     return GenericVisaScpiDriver(config)
