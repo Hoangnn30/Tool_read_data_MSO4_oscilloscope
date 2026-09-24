@@ -1616,10 +1616,21 @@ class MSO4ScopeApp:
         self.status_var.set(f"Starting {self._selected_channel} first...")
         self.transfer_var.set("Waiting for first waveform...")
 
+        ordered_channels = list(channels)
+        if self._selected_channel in ordered_channels:
+            ordered_channels = [
+                self._selected_channel,
+                *[
+                    ch
+                    for ch in ordered_channels
+                    if ch != self._selected_channel
+                ],
+            ]
+
         def worker() -> None:
             try:
                 self.client.prepare_acquisition(
-                    channels,
+                    ordered_channels,
                     fast_record_length=None,
                 )
                 self.command_queue.put(("prepared", None))
@@ -1627,36 +1638,29 @@ class MSO4ScopeApp:
                 self.command_queue.put(("acq_error", f"Cannot start acquisition: {exc}"))
                 return
 
-            # Put the currently selected channel first so the user sees a
-            # waveform as soon as possible. Other channels are initialized lazily
-            # on their first round-robin turn.
-            if self._selected_channel in channels:
-                channels = [
-                    self._selected_channel,
-                    *[ch for ch in channels if ch != self._selected_channel],
-                ]
-
             last_report = time.monotonic()
             updates = 0
             channel_index = 0
             consecutive_failures = 0
-            per_tick_ms = max(2.0, refresh_ms / max(1, len(channels)))
+            per_tick_ms = max(2.0, refresh_ms / max(1, len(ordered_channels)))
 
             # Round-robin: one CURVE? transaction per loop. This avoids waiting
             # for all 4 channels before the UI gets a new frame.
             while not self.stop_event.is_set():
                 started = time.monotonic()
-                ch = channels[channel_index]
-                channel_index = (channel_index + 1) % len(channels)
+                ch = ordered_channels[channel_index]
+                channel_index = (channel_index + 1) % len(ordered_channels)
 
                 successful = self._acquire_one_frame([ch], points, exact=False)
 
                 if successful:
+                    if updates == 0:
+                        self.command_queue.put(("first_waveform", ch))
                     consecutive_failures = 0
                     updates += 1
                 else:
                     consecutive_failures += 1
-                    if consecutive_failures >= max(4, len(channels) * 3):
+                    if consecutive_failures >= max(4, len(ordered_channels) * 3):
                         errors = " | ".join(
                             f"{c}: {msg}" for c, msg in self.channel_errors.items()
                         )
@@ -2365,7 +2369,10 @@ class MSO4ScopeApp:
                     if record:
                         self.status_var.set(f"RUN | record length {record}")
                     else:
-                        self.status_var.set("RUN")
+                        self.status_var.set("RUN started")
+
+                elif kind == "first_waveform":
+                    self.status_var.set(f"RUN | {msg[1]} waveform received")
 
                 elif kind == "rate":
                     self.rate_var.set(f"Acq: {msg[1]:.1f} fps")
