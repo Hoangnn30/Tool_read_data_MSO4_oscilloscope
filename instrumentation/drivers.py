@@ -6,7 +6,7 @@ import socket
 import pyvisa
 import serial
 
-from mso4 import MSO4Client
+from mso4 import MSO4Client, TekHSIWaveformClient
 
 from .base import InstrumentDriver
 from .models import ConnectionType, DeviceConfig, DeviceStatus
@@ -29,6 +29,7 @@ class MSO4InstrumentDriver(InstrumentDriver):
     def __init__(self, config: DeviceConfig):
         super().__init__(config)
         self.client: MSO4Client | None = None
+        self.hsi: TekHSIWaveformClient | None = None
 
     def connect(self) -> str:
         self.status = DeviceStatus.CONNECTING
@@ -39,6 +40,7 @@ class MSO4InstrumentDriver(InstrumentDriver):
                 resource_name=(self.config.visa_resource or None),
             )
             self.idn = self.client.connect()
+            self.hsi = TekHSIWaveformClient(self.config.ip, port=5000)
             self.status = DeviceStatus.ONLINE
             return self.idn
         except Exception:
@@ -46,6 +48,13 @@ class MSO4InstrumentDriver(InstrumentDriver):
             raise
 
     def disconnect(self) -> None:
+        if self.hsi:
+            try:
+                self.hsi.close()
+            except Exception:
+                pass
+        self.hsi = None
+
         if self.client:
             self.client.close()
         self.client = None
@@ -74,9 +83,22 @@ class MSO4InstrumentDriver(InstrumentDriver):
     def get_data(self, **kwargs) -> Any:
         if not self.client:
             raise RuntimeError("Device is not connected.")
-        channel = str(kwargs.get("channel", "CH1"))
+
+        channel = str(kwargs.get("channel", "CH1")).upper()
         points = int(kwargs.get("points", 5000))
         exact = bool(kwargs.get("exact", False))
+
+        # Manufacturer-recommended path: TekHSI for waveform transfer.
+        if (
+            not exact
+            and self.hsi is not None
+            and TekHSIWaveformClient.available()
+        ):
+            waveforms = self.hsi.get_waveforms([channel])
+            if channel in waveforms:
+                return waveforms[channel]
+
+        # Exact/manual fallback remains available through SCPI/VISA.
         if exact:
             return self.client.get_waveform(channel, 1, points)
         return self.client.get_waveform_fast(channel, 1, points)
