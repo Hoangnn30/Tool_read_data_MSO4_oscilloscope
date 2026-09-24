@@ -62,43 +62,93 @@ class MSO4Client:
         return self._instrument is not None
 
     def connect(self) -> str:
+        """Open a clean VISA/VXI-11 session with retry and backend fallback.
+
+        Tektronix scopes can occasionally leave the VXI-11 core link in a stale
+        state after a previous process exits or a LAN connection is interrupted.
+        Recreating both ResourceManager and resource is more reliable than
+        retrying on the same broken socket.
+        """
         self.close()
-        try:
-            self._rm = pyvisa.ResourceManager(self.backend)
-            inst = self._rm.open_resource(self.resource_name)
 
-            if not isinstance(inst, MessageBasedResource):
-                inst.close()
-                raise MSO4Error(
-                    f"VISA resource is not message-based: {self.resource_name}"
-                )
+        backend_candidates: list[str | None] = [self.backend]
+        if self.backend == "@py":
+            # If NI-VISA/Keysight VISA is installed, also try the system backend.
+            backend_candidates.append(None)
 
-            inst.timeout = int(self.timeout * 1000)
-            inst.write_termination = "\n"
-            inst.read_termination = "\n"
-            inst.chunk_size = 4 * 1024 * 1024
-            self._instrument = inst
+        errors: list[str] = []
+        delays = (0.0, 0.35, 0.9)
 
-            try:
-                inst.clear()
-            except Exception:
-                pass
+        for backend in backend_candidates:
+            backend_name = backend or "system VISA"
 
-            idn = self.query("*IDN?")
-            if not idn:
-                raise MSO4Error(
-                    f"Connected to {self.resource_name}, but *IDN? returned no data."
-                )
-            return idn
+            for attempt, delay in enumerate(delays, start=1):
+                if delay:
+                    time.sleep(delay)
 
-        except Exception as exc:
-            self.close()
-            if isinstance(exc, MSO4Error):
-                raise
-            raise MSO4Error(
-                "TCPIP/LAN VISA connection failed. "
-                f"Resource: {self.resource_name}. Error: {exc}"
-            ) from exc
+                self.close()
+
+                try:
+                    rm = (
+                        pyvisa.ResourceManager(backend)
+                        if backend is not None
+                        else pyvisa.ResourceManager()
+                    )
+                    self._rm = rm
+
+                    inst = rm.open_resource(self.resource_name)
+
+                    if not isinstance(inst, MessageBasedResource):
+                        try:
+                            inst.close()
+                        finally:
+                            raise MSO4Error(
+                                f"VISA resource is not message-based: "
+                                f"{self.resource_name}"
+                            )
+
+                    # Give VXI-11 link setup more room than ordinary SCPI reads.
+                    inst.timeout = max(int(self.timeout * 1000), 8000)
+                    inst.write_termination = "\n"
+                    inst.read_termination = "\n"
+                    inst.chunk_size = 4 * 1024 * 1024
+                    self._instrument = inst
+
+                    try:
+                        inst.clear()
+                    except Exception:
+                        # Some VXI-11 implementations reject device_clear while
+                        # still accepting normal SCPI traffic.
+                        pass
+
+                    idn = self.query("*IDN?")
+                    if not idn:
+                        raise MSO4Error(
+                            f"Connected to {self.resource_name}, but *IDN? "
+                            "returned no data."
+                        )
+
+                    return idn
+
+                except Exception as exc:
+                    errors.append(
+                        f"{backend_name} attempt {attempt}: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    self.close()
+
+        details = " | ".join(errors[-6:])
+        hint = (
+            "The LAN address may still be reachable, but the oscilloscope "
+            "VXI-11 service closed the session while creating the VISA link. "
+            "Close other remote-control applications and retry. If it persists, "
+            "toggle/restart the instrument LAN remote interface or reboot the "
+            "oscilloscope."
+        )
+        raise MSO4Error(
+            "TCPIP/LAN VISA VXI-11 connection failed. "
+            f"Resource: {self.resource_name}. {hint} Attempts: {details}"
+        )
 
     def close(self) -> None:
         self._fast_transfer_cache.clear()
