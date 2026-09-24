@@ -1566,6 +1566,11 @@ class MSO4ScopeApp:
 
         def worker() -> None:
             try:
+                try:
+                    self.client.exit_realtime_mode()
+                except Exception:
+                    pass
+
                 self.client.single_acquisition()
                 self.client.wait_for_acquisition_complete(timeout=3.0)
                 self._acquire_one_frame(channels, points, exact=True)
@@ -1608,6 +1613,11 @@ class MSO4ScopeApp:
 
         def worker() -> None:
             try:
+                try:
+                    self.client.exit_realtime_mode()
+                except Exception:
+                    pass
+
                 started = time.monotonic()
                 successful = self._acquire_one_frame(channels, points, exact=True)
                 if successful == 0:
@@ -1717,6 +1727,14 @@ class MSO4ScopeApp:
         def worker() -> None:
             # Control plane: SCPI/VISA. Data plane: TekHSI first.
             try:
+                if fast_mode:
+                    realtime_info = self.client.enter_realtime_mode(
+                        record_points=max(2000, min(10000, fast_record))
+                    )
+                    self.command_queue.put(
+                        ("realtime_mode", realtime_info)
+                    )
+
                 self.client.run_acquisition()
             except Exception as exc:
                 self.command_queue.put(
@@ -2007,6 +2025,15 @@ class MSO4ScopeApp:
                     self.client.stop_acquisition()
                 except Exception:
                     pass
+
+                try:
+                    restored = self.client.exit_realtime_mode()
+                    self.command_queue.put(
+                        ("realtime_restored", restored)
+                    )
+                except Exception:
+                    pass
+
             threading.Thread(target=worker, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -2660,6 +2687,27 @@ class MSO4ScopeApp:
                         self.root.after(40, self._start_acquisition)
                     else:
                         self._redraw_scope()
+
+                elif kind == "realtime_mode":
+                    info = msg[1] or {}
+                    record = info.get("record_length")
+                    scale = info.get("horizontal_scale")
+                    if scale:
+                        self.time_scale_var.set(
+                            self._format_time_div(float(scale))
+                        )
+                    self.transfer_var.set(
+                        f"Realtime record {record or '?'} pts"
+                    )
+
+                elif kind == "realtime_restored":
+                    info = msg[1] or {}
+                    scale = info.get("horizontal_scale")
+                    if scale:
+                        self.time_scale_var.set(
+                            self._format_time_div(float(scale))
+                        )
+                    self._redraw_scope()
 
                 elif kind == "transport":
                     self.transfer_var.set(
