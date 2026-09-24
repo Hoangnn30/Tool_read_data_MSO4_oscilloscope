@@ -1715,28 +1715,179 @@ class MSO4ScopeApp:
             ]
 
         def worker() -> None:
+            # Control plane: SCPI/VISA. Data plane: TekHSI first.
             try:
-                self.client.prepare_acquisition(
-                    ordered_channels,
-                    fast_record_length=None,
-                )
-                self.command_queue.put(("prepared", None))
+                self.client.run_acquisition()
             except Exception as exc:
-                self.command_queue.put(("acq_error", f"Cannot start acquisition: {exc}"))
+                self.command_queue.put(
+                    ("acq_error", f"Cannot start acquisition: {exc}")
+                )
                 return
 
+            self.command_queue.put(("prepared", None))
+
+            # ----------------------------------------------------------
+            # Preferred path: Tektronix High Speed Interface (port 5000)
+            # ----------------------------------------------------------
+            if (
+                self.hsi_client is not None
+                and TekHSIWaveformClient.available()
+            ):
+                try:
+                    self.hsi_client.connect(ordered_channels)
+                    self.waveform_transport = "TekHSI"
+                    self.command_queue.put(("transport", "TekHSI"))
+
+                    last_report = time.monotonic()
+                    acquisitions = 0
+                    first_sent = False
+
+                    while (
+                        not session_stop.is_set()
+                        and generation == self._acq_generation
+                    ):
+                        started = time.monotonic()
+                        batch = self.hsi_client.get_waveforms(
+                            ordered_channels
+                        )
+
+                        if (
+                            session_stop.is_set()
+                            or generation != self._acq_generation
+                        ):
+                            break
+
+                        if not batch:
+                            continue
+
+                        now = time.monotonic()
+
+                        for ch, waveform in batch.items():
+                            if ch not in ordered_channels:
+                                continue
+
+                            full_n = len(waveform.time_s)
+                            if full_n == 0:
+                                continue
+
+                            # Keep complete time coverage but bound UI work.
+                            stride = max(
+                                1,
+                                int(math.ceil(full_n / max(500, points))),
+                            )
+                            if stride > 1:
+                                time_s = waveform.time_s[::stride]
+                                volts = waveform.volts[::stride]
+                            else:
+                                time_s = waveform.time_s
+                                volts = waveform.volts
+
+                            display_waveform = type(waveform)(
+                                channel=ch,
+                                time_s=time_s,
+                                volts=volts,
+                            )
+
+                            if (
+                                now
+                                - self._last_measure_update.get(ch, 0.0)
+                                >= 0.20
+                            ):
+                                measurements = (
+                                    display_waveform.measurements()
+                                )
+                                self._last_measure_update[ch] = now
+                            else:
+                                measurements = None
+
+                            info = {
+                                "mode": "TEKHSI",
+                                "points": int(len(time_s)),
+                                "record_length": int(full_n),
+                                "resample": int(stride),
+                                "time_start": (
+                                    float(time_s[0])
+                                    if len(time_s)
+                                    else None
+                                ),
+                                "time_stop": (
+                                    float(time_s[-1])
+                                    if len(time_s)
+                                    else None
+                                ),
+                            }
+
+                            with self.frame_lock:
+                                self.latest_frames[ch] = (
+                                    time_s,
+                                    volts,
+                                    measurements,
+                                    info,
+                                )
+
+                        if not first_sent:
+                            self.command_queue.put(
+                                (
+                                    "first_waveform",
+                                    "+".join(batch.keys()),
+                                )
+                            )
+                            first_sent = True
+
+                        acquisitions += 1
+
+                        if now - last_report >= 1.0:
+                            self.command_queue.put(
+                                (
+                                    "rate",
+                                    acquisitions / (now - last_report),
+                                )
+                            )
+                            acquisitions = 0
+                            last_report = now
+
+                        elapsed_ms = (
+                            time.monotonic() - started
+                        ) * 1000.0
+                        remaining = max(0.0, refresh_ms - elapsed_ms)
+                        if remaining:
+                            session_stop.wait(remaining / 1000.0)
+
+                    return
+
+                except Exception as exc:
+                    try:
+                        self.hsi_client.close()
+                    except Exception:
+                        pass
+
+                    self.waveform_transport = "SCPI"
+                    self.command_queue.put(
+                        ("hsi_fallback", str(exc))
+                    )
+
+            # ----------------------------------------------------------
+            # Fallback: VISA/SCPI CURVE?
+            # ----------------------------------------------------------
+            self.waveform_transport = "SCPI"
             last_report = time.monotonic()
             updates = 0
             channel_index = 0
             consecutive_failures = 0
-            per_tick_ms = max(2.0, refresh_ms / max(1, len(ordered_channels)))
+            per_tick_ms = max(
+                2.0,
+                refresh_ms / max(1, len(ordered_channels)),
+            )
 
-            # Round-robin: one CURVE? transaction per loop. This avoids waiting
-            # for all 4 channels before the UI gets a new frame.
-            while not session_stop.is_set() and generation == self._acq_generation:
+            while (
+                not session_stop.is_set()
+                and generation == self._acq_generation
+            ):
                 started = time.monotonic()
                 ch = ordered_channels[channel_index]
-                channel_index = (channel_index + 1) % len(ordered_channels)
+                channel_index = (
+                    channel_index + 1
+                ) % len(ordered_channels)
 
                 successful = self._acquire_one_frame(
                     [ch],
@@ -1748,30 +1899,44 @@ class MSO4ScopeApp:
 
                 if successful:
                     if updates == 0:
-                        self.command_queue.put(("first_waveform", ch))
+                        self.command_queue.put(
+                            ("first_waveform", ch)
+                        )
                     consecutive_failures = 0
                     updates += 1
                 else:
                     consecutive_failures += 1
-                    if consecutive_failures >= max(4, len(ordered_channels) * 3):
+                    if consecutive_failures >= max(
+                        4,
+                        len(ordered_channels) * 3,
+                    ):
                         errors = " | ".join(
-                            f"{c}: {msg}" for c, msg in self.channel_errors.items()
+                            f"{c}: {msg}"
+                            for c, msg in self.channel_errors.items()
                         )
                         self.command_queue.put(
                             (
                                 "acq_error",
-                                "Repeated waveform read failures. " + errors,
+                                "Repeated waveform read failures. "
+                                + errors,
                             )
                         )
                         return
 
                 now = time.monotonic()
                 if now - last_report >= 1.0:
-                    self.command_queue.put(("rate", updates / (now - last_report)))
+                    self.command_queue.put(
+                        (
+                            "rate",
+                            updates / (now - last_report),
+                        )
+                    )
                     updates = 0
                     last_report = now
 
-                elapsed_ms = (time.monotonic() - started) * 1000.0
+                elapsed_ms = (
+                    time.monotonic() - started
+                ) * 1000.0
                 remaining = max(0.0, per_tick_ms - elapsed_ms)
                 if remaining:
                     session_stop.wait(remaining / 1000.0)
@@ -2495,6 +2660,22 @@ class MSO4ScopeApp:
                         self.root.after(40, self._start_acquisition)
                     else:
                         self._redraw_scope()
+
+                elif kind == "transport":
+                    self.transfer_var.set(
+                        f"Waveform transport: {msg[1]} :5000"
+                    )
+                    self.status_var.set(
+                        f"RUN started | waveform: {msg[1]}"
+                    )
+
+                elif kind == "hsi_fallback":
+                    self.transfer_var.set(
+                        "TekHSI unavailable; using SCPI fallback"
+                    )
+                    self.status_var.set(
+                        f"TekHSI fallback: {msg[1]}"
+                    )
 
                 elif kind == "prepared":
                     record = msg[1]
