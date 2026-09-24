@@ -1035,18 +1035,24 @@ class MSO4ScopeApp:
         if was_running:
             self._stop_acquisition(local_only=True)
 
+        # GET DATA is an explicit snapshot operation. Clear the local stop flag
+        # before reading and use the full metadata/exact waveform path.
+        self.stop_event.clear()
+
         self.status_var.set(f"GET DATA: reading {points} points...")
         self.transfer_var.set(f"Reading exact waveform snapshot ({points} pts)...")
 
         def worker() -> None:
             try:
-                successful = self._acquire_one_frame(channels, points, exact=False)
+                started = time.monotonic()
+                successful = self._acquire_one_frame(channels, points, exact=True)
                 if successful == 0:
                     errors = " | ".join(
                         f"{ch}: {msg}" for ch, msg in self.channel_errors.items()
                     )
                     raise RuntimeError(errors or "No waveform data returned.")
-                self.command_queue.put(("get_data_done", was_running))
+                elapsed = time.monotonic() - started
+                self.command_queue.put(("get_data_done", was_running, points, elapsed))
             except Exception as exc:
                 self.command_queue.put(("command_error", "GET DATA", str(exc)))
 
@@ -1139,7 +1145,7 @@ class MSO4ScopeApp:
 
             while not self.stop_event.is_set():
                 started = time.monotonic()
-                successful = self._acquire_one_frame(channels, points)
+                successful = self._acquire_one_frame(channels, points, exact=False)
 
                 if successful == 0:
                     errors = " | ".join(
@@ -1515,8 +1521,10 @@ class MSO4ScopeApp:
                     self.run_btn.configure(text="RUN")
 
                 elif kind == "get_data_done":
-                    _, resume = msg
-                    self.status_var.set("GET DATA complete")
+                    _, resume, points, elapsed = msg
+                    self.status_var.set(
+                        f"GET DATA complete: {points} pts in {elapsed:.3f}s"
+                    )
                     self._need_autoscale = True
                     if resume and self.client and self.client.connected:
                         self.root.after(80, self._start_acquisition)
