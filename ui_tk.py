@@ -506,7 +506,7 @@ class MSO4ScopeApp:
             row=3, column=1, sticky="ew", pady=2
         )
 
-        self._form_label(acq, "Fast rec", 4)
+        self._form_label(acq, "Display pts", 4)
         self._dark_entry(acq, self.fast_record_var, 7).grid(
             row=4, column=1, sticky="ew", pady=2
         )
@@ -932,7 +932,7 @@ class MSO4ScopeApp:
 
         tk.Label(
             outer,
-            text="Wheel: CH Position | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div",
+            text="Wheel: CH Position | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div | Fast display keeps full record",
             bg="#0E151D",
             fg="#708090",
             font=("Arial", 8),
@@ -1309,8 +1309,10 @@ class MSO4ScopeApp:
         try:
             points = max(500, int(self.points_var.get()))
             refresh_ms = max(20, int(self.refresh_var.get()))
-            fast_record = max(points, int(self.fast_record_var.get()))
+            fast_record = max(500, int(self.fast_record_var.get()))
             fast_mode = bool(self.fast_mode_var.get())
+            if fast_mode:
+                points = fast_record
         except ValueError:
             messagebox.showwarning(
                 "Acquisition",
@@ -1330,7 +1332,7 @@ class MSO4ScopeApp:
             try:
                 self.client.prepare_acquisition(
                     channels,
-                    fast_record_length=(fast_record if fast_mode else None),
+                    fast_record_length=None,
                 )
                 record_length = self.client.get_record_length()
                 self.command_queue.put(("prepared", record_length))
@@ -1451,9 +1453,11 @@ class MSO4ScopeApp:
                 range_text = ""
                 if t0 is not None and t1 is not None:
                     range_text = f" | {self._format_time(float(t0))} .. {self._format_time(float(t1))}"
+                resample = info.get("resample")
                 latest_status = (
                     f"{ch}: {npts} pts {mode}"
                     + (f" | record {record}" if record else "")
+                    + (f" | resample x{resample}" if resample else "")
                     + range_text
                 )
 
