@@ -37,6 +37,7 @@ class MSO4ScopeApp:
 
         self.waveforms: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.measurements: dict[str, dict[str, float]] = {}
+        self.channel_errors: dict[str, str] = {}
 
         self.x_range: Optional[tuple[float, float]] = None
         self.y_range: Optional[tuple[float, float]] = None
@@ -49,6 +50,7 @@ class MSO4ScopeApp:
         self.scpi_var = tk.StringVar(value="*IDN?")
         self.scpi_result_var = tk.StringVar(value="Ready")
         self.cursor_var = tk.StringVar(value="t = --    V = --")
+        self.transfer_var = tk.StringVar(value="No waveform data yet")
         self.channel_vars = {
             ch: tk.BooleanVar(value=(ch == "CH1"))
             for ch in CHANNEL_COLORS
@@ -430,6 +432,12 @@ class MSO4ScopeApp:
         self.ip_entry.configure(state="normal")
         self.status_var.set("Disconnected")
         self.rate_var.set("Acq: -- fps")
+        self.transfer_var.set("No waveform data yet")
+        self.waveforms.clear()
+        self.x_range = None
+        self.y_range = None
+        if hasattr(self, "canvas"):
+            self._redraw_scope()
 
     def _toggle_run(self) -> None:
         if self.acq_thread and self.acq_thread.is_alive():
@@ -454,6 +462,10 @@ class MSO4ScopeApp:
             return
 
         self.stop_event.clear()
+        self.x_range = None
+        self.y_range = None
+        self.channel_errors.clear()
+        self.transfer_var.set("Starting MSO4 acquisition...")
         self.run_btn.configure(text="STOP")
 
         def worker() -> None:
