@@ -74,8 +74,12 @@ class MSO4ScopeApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("MSO44B LAN Scope")
-        self.root.geometry("1580x930")
-        self.root.minsize(1180, 720)
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        window_w = min(1560, max(1180, screen_w - 40))
+        window_h = min(900, max(700, screen_h - 90))
+        self.root.geometry(f"{window_w}x{window_h}")
+        self.root.resizable(False, False)
         self.root.configure(bg="#0D1117")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -174,7 +178,7 @@ class MSO4ScopeApp:
             "Title.TLabel",
             background="#111820",
             foreground="#F0F4F8",
-            font=("Arial", 16, "bold"),
+            font=("Arial", 14, "bold"),
         )
         style.configure(
             "Section.TLabel",
@@ -182,7 +186,7 @@ class MSO4ScopeApp:
             foreground="#8FA3B8",
             font=("Arial", 9, "bold"),
         )
-        style.configure("Dark.TButton", font=("Arial", 10, "bold"))
+        style.configure("Dark.TButton", font=("Arial", 9, "bold"), padding=(5, 3))
         style.configure(
             "Dark.TCombobox",
             fieldbackground="#0B1016",
@@ -199,26 +203,30 @@ class MSO4ScopeApp:
     def _build_ui(self) -> None:
         self._build_topbar()
 
-        body = tk.PanedWindow(
-            self.root,
-            orient=tk.HORIZONTAL,
-            bg="#0D1117",
-            sashwidth=6,
-            bd=0,
-            relief="flat",
-        )
+        # Fixed three-column layout: no draggable sash, no side-panel scrolling.
+        body = tk.Frame(self.root, bg="#0D1117")
         body.pack(fill="both", expand=True, padx=10, pady=4)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, minsize=300, weight=0)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(2, minsize=300, weight=0)
 
         left = self._build_left_panel(body)
         center = self._build_scope_panel(body)
         right = self._build_right_panel(body)
 
-        body.add(left, minsize=290, width=315)
-        body.add(center, minsize=620)
-        body.add(right, minsize=285, width=310)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        center.grid(row=0, column=1, sticky="nsew")
+        right.grid(row=0, column=2, sticky="nsew", padx=(6, 0))
 
-        status = tk.Frame(self.root, bg="#0B0F14", height=30)
-        status.pack(fill="x", padx=10, pady=(4, 10))
+        left.configure(width=300)
+        right.configure(width=300)
+        left.pack_propagate(False)
+        right.pack_propagate(False)
+
+        status = tk.Frame(self.root, bg="#0B0F14", height=28)
+        status.pack(fill="x", padx=10, pady=(4, 8))
+        status.pack_propagate(False)
 
         tk.Label(
             status,
@@ -226,7 +234,8 @@ class MSO4ScopeApp:
             bg="#0B0F14",
             fg="#B9C0C8",
             anchor="w",
-        ).pack(side="left", padx=8, pady=5)
+            font=("Arial", 9),
+        ).pack(side="left", padx=8, pady=4)
 
         tk.Label(
             status,
@@ -234,7 +243,8 @@ class MSO4ScopeApp:
             bg="#0B0F14",
             fg="#B9C0C8",
             anchor="e",
-        ).pack(side="right", padx=8, pady=5)
+            font=("Arial", 9),
+        ).pack(side="right", padx=8, pady=4)
 
     def _build_topbar(self) -> None:
         top = ttk.Frame(self.root, style="Dark.TFrame", padding=(12, 8))
@@ -312,42 +322,22 @@ class MSO4ScopeApp:
         self.default_btn.pack(side="left", padx=3)
 
     def _build_left_panel(self, parent) -> tk.Frame:
-        outer = tk.Frame(parent, bg="#111820")
-        canvas = tk.Canvas(outer, bg="#111820", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg="#111820")
-
-        inner.bind(
-            "<Configure>",
-            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        outer = tk.Frame(
+            parent,
+            bg="#111820",
+            highlightbackground="#26313D",
+            highlightthickness=1,
         )
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        canvas.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
-        canvas.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
-        canvas.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
-        canvas.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
-        canvas.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
-        canvas.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
-        inner.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
-
-        self._section_label(inner, "CHANNELS")
+        self._section_label(outer, "CHANNELS", top_pad=7)
 
         for ch, color in CHANNEL_COLORS.items():
-            self._build_channel_card(inner, ch, color)
+            self._build_channel_card(outer, ch, color)
 
-        self._section_label(inner, "ACQUISITION", top_pad=16)
+        self._section_label(outer, "ACQUISITION", top_pad=8)
 
-        acq = tk.Frame(inner, bg="#111820")
-        acq.pack(fill="x", padx=10)
+        acq = tk.Frame(outer, bg="#111820")
+        acq.pack(fill="x", padx=8)
 
         self._form_label(acq, "Mode", 0)
         mode_combo = ttk.Combobox(
@@ -356,92 +346,98 @@ class MSO4ScopeApp:
             values=["SAMPLE", "PEAKDETECT", "HIRES", "AVERAGE", "ENVELOPE"],
             state="readonly",
             style="Dark.TCombobox",
-            width=13,
+            width=11,
         )
-        mode_combo.grid(row=0, column=1, sticky="ew", pady=3)
+        mode_combo.grid(row=0, column=1, sticky="ew", pady=2)
         mode_combo.bind("<<ComboboxSelected>>", lambda _e: self._apply_acquire_mode())
 
-        self._form_label(acq, "Average N", 1)
-        avg = self._dark_entry(acq, self.average_count_var, 9)
-        avg.grid(row=1, column=1, sticky="ew", pady=3)
+        self._form_label(acq, "Avg N", 1)
+        avg = self._dark_entry(acq, self.average_count_var, 7)
+        avg.grid(row=1, column=1, sticky="ew", pady=2)
         avg.bind("<Return>", lambda _e: self._apply_average_count())
 
-        self._form_label(acq, "Transfer pts", 2)
-        points_combo = ttk.Combobox(
+        self._form_label(acq, "Transfer", 2)
+        ttk.Combobox(
             acq,
             textvariable=self.points_var,
             values=["1000", "2500", "5000", "10000", "25000", "50000"],
             state="readonly",
             style="Dark.TCombobox",
-            width=13,
-        )
-        points_combo.grid(row=2, column=1, sticky="ew", pady=3)
+            width=11,
+        ).grid(row=2, column=1, sticky="ew", pady=2)
 
         self._form_label(acq, "Refresh ms", 3)
-        refresh = self._dark_entry(acq, self.refresh_var, 9)
-        refresh.grid(row=3, column=1, sticky="ew", pady=3)
+        self._dark_entry(acq, self.refresh_var, 7).grid(
+            row=3, column=1, sticky="ew", pady=2
+        )
 
-        self._form_label(acq, "Fast record", 4)
-        fast = self._dark_entry(acq, self.fast_record_var, 9)
-        fast.grid(row=4, column=1, sticky="ew", pady=3)
+        self._form_label(acq, "Fast rec", 4)
+        self._dark_entry(acq, self.fast_record_var, 7).grid(
+            row=4, column=1, sticky="ew", pady=2
+        )
+        acq.columnconfigure(1, weight=1)
 
-        fast_cb = tk.Checkbutton(
-            acq,
-            text="Fast display mode",
+        options = tk.Frame(outer, bg="#111820")
+        options.pack(fill="x", padx=8, pady=(3, 2))
+
+        tk.Checkbutton(
+            options,
+            text="Fast display",
             variable=self.fast_mode_var,
             bg="#111820",
             fg="#D7DEE7",
             selectcolor="#0B1016",
             activebackground="#111820",
             activeforeground="#F0F4F8",
-        )
-        fast_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(5, 2))
+            font=("Arial", 9),
+        ).pack(side="left")
 
-        full_cb = tk.Checkbutton(
-            acq,
-            text="GET DATA = full record",
+        tk.Checkbutton(
+            options,
+            text="GET full record",
             variable=self.get_full_record_var,
             bg="#111820",
             fg="#D7DEE7",
             selectcolor="#0B1016",
             activebackground="#111820",
             activeforeground="#F0F4F8",
-        )
-        full_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 2))
-
-        acq.columnconfigure(1, weight=1)
+            font=("Arial", 9),
+        ).pack(side="right")
 
         ttk.Button(
-            inner,
+            outer,
             text="APPLY ACQUISITION",
             command=self._apply_acquisition_controls,
             style="Dark.TButton",
-        ).pack(fill="x", padx=10, pady=(8, 4))
+        ).pack(fill="x", padx=8, pady=(2, 4))
 
-        self._section_label(inner, "SCPI CONSOLE", top_pad=16)
+        self._section_label(outer, "SCPI", top_pad=6)
 
-        self.scpi_entry = self._dark_entry(inner, self.scpi_var, 24)
-        self.scpi_entry.pack(fill="x", padx=10, ipady=3)
+        scpi_row = tk.Frame(outer, bg="#111820")
+        scpi_row.pack(fill="x", padx=8)
+        self.scpi_entry = self._dark_entry(scpi_row, self.scpi_var, 18)
+        self.scpi_entry.pack(side="left", fill="x", expand=True, ipady=2)
         self.scpi_entry.bind("<Return>", lambda _e: self._send_scpi())
 
         self.scpi_btn = ttk.Button(
-            inner,
-            text="SEND SCPI",
+            scpi_row,
+            text="SEND",
             command=self._send_scpi,
             style="Dark.TButton",
             state="disabled",
         )
-        self.scpi_btn.pack(fill="x", padx=10, pady=5)
+        self.scpi_btn.pack(side="right", padx=(4, 0))
 
         tk.Label(
-            inner,
+            outer,
             textvariable=self.scpi_result_var,
             bg="#111820",
             fg="#93A0AD",
             justify="left",
-            wraplength=255,
+            wraplength=275,
             anchor="nw",
-        ).pack(fill="x", padx=10, pady=(2, 10))
+            font=("Arial", 8),
+        ).pack(fill="x", padx=8, pady=(3, 5))
 
         return outer
 
@@ -452,15 +448,14 @@ class MSO4ScopeApp:
             highlightbackground="#273441",
             highlightthickness=1,
         )
-        card.pack(fill="x", padx=10, pady=4)
+        card.pack(fill="x", padx=8, pady=2)
         card.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
 
-        top = tk.Frame(card, bg="#161E27")
-        top.pack(fill="x", padx=7, pady=(6, 3))
-        top.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
+        row1 = tk.Frame(card, bg="#161E27")
+        row1.pack(fill="x", padx=5, pady=(3, 1))
 
         cb = tk.Checkbutton(
-            top,
+            row1,
             text=ch,
             variable=self.channel_vars[ch],
             command=lambda c=ch: self._channel_state_changed(c),
@@ -469,54 +464,50 @@ class MSO4ScopeApp:
             selectcolor="#0B1016",
             activebackground="#161E27",
             activeforeground=color,
-            font=("Arial", 11, "bold"),
+            font=("Arial", 10, "bold"),
         )
         cb.pack(side="left")
 
+        tk.Label(row1, text="V/div", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(
+            side="left", padx=(5, 2)
+        )
+        ttk.Combobox(
+            row1,
+            textvariable=self.channel_scale_vars[ch],
+            values=[self._format_vdiv(v) for v in VERTICAL_SCALES],
+            state="readonly",
+            style="Dark.TCombobox",
+            width=9,
+        ).pack(side="left")
+
         ttk.Button(
-            top,
+            row1,
             text="SET",
             command=lambda c=ch: self._apply_channel(c),
             style="Dark.TButton",
         ).pack(side="right")
 
-        grid = tk.Frame(card, bg="#161E27")
-        grid.pack(fill="x", padx=7, pady=(2, 7))
-        grid.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
+        row2 = tk.Frame(card, bg="#161E27")
+        row2.pack(fill="x", padx=5, pady=(1, 4))
 
-        tk.Label(grid, text="V/div", bg="#161E27", fg="#B9C0C8").grid(row=0, column=0, sticky="w")
-        scale = ttk.Combobox(
-            grid,
-            textvariable=self.channel_scale_vars[ch],
-            values=[self._format_vdiv(v) for v in VERTICAL_SCALES],
-            state="readonly",
-            style="Dark.TCombobox",
-            width=11,
-        )
-        scale.grid(row=0, column=1, sticky="ew", padx=(5, 0), pady=2)
-
-        tk.Label(grid, text="Pos div", bg="#161E27", fg="#B9C0C8").grid(row=1, column=0, sticky="w")
-        self._dark_entry(grid, self.channel_position_vars[ch], 8).grid(
-            row=1, column=1, sticky="ew", padx=(5, 0), pady=2
+        tk.Label(row2, text="Pos", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
+        self._dark_entry(row2, self.channel_position_vars[ch], 5).pack(
+            side="left", padx=(2, 5), ipady=1
         )
 
-        tk.Label(grid, text="Offset V", bg="#161E27", fg="#B9C0C8").grid(row=2, column=0, sticky="w")
-        self._dark_entry(grid, self.channel_offset_vars[ch], 8).grid(
-            row=2, column=1, sticky="ew", padx=(5, 0), pady=2
+        tk.Label(row2, text="Off", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
+        self._dark_entry(row2, self.channel_offset_vars[ch], 5).pack(
+            side="left", padx=(2, 5), ipady=1
         )
 
-        tk.Label(grid, text="Coupling", bg="#161E27", fg="#B9C0C8").grid(row=3, column=0, sticky="w")
-        coupling = ttk.Combobox(
-            grid,
+        ttk.Combobox(
+            row2,
             textvariable=self.channel_coupling_vars[ch],
             values=["DC", "AC"],
             state="readonly",
             style="Dark.TCombobox",
-            width=11,
-        )
-        coupling.grid(row=3, column=1, sticky="ew", padx=(5, 0), pady=2)
-
-        grid.columnconfigure(1, weight=1)
+            width=4,
+        ).pack(side="right")
 
     def _build_scope_panel(self, parent) -> tk.Frame:
         frame = tk.Frame(
@@ -582,54 +573,43 @@ class MSO4ScopeApp:
         return frame
 
     def _build_right_panel(self, parent) -> tk.Frame:
-        outer = tk.Frame(parent, bg="#111820")
-        canvas = tk.Canvas(outer, bg="#111820", highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg="#111820")
-
-        inner.bind(
-            "<Configure>",
-            lambda _e: canvas.configure(scrollregion=canvas.bbox("all")),
+        outer = tk.Frame(
+            parent,
+            bg="#111820",
+            highlightbackground="#26313D",
+            highlightthickness=1,
         )
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        self._section_label(inner, "HORIZONTAL")
-
-        horizontal = tk.Frame(inner, bg="#111820")
-        horizontal.pack(fill="x", padx=10)
+        self._section_label(outer, "HORIZONTAL", top_pad=7)
+        horizontal = tk.Frame(outer, bg="#111820")
+        horizontal.pack(fill="x", padx=8)
 
         self._form_label(horizontal, "Time/div", 0)
-        time_combo = ttk.Combobox(
+        ttk.Combobox(
             horizontal,
             textvariable=self.time_scale_var,
             values=[self._format_time_div(v) for v in TIME_SCALES],
             state="readonly",
             style="Dark.TCombobox",
-            width=13,
-        )
-        time_combo.grid(row=0, column=1, sticky="ew", pady=3)
+            width=11,
+        ).grid(row=0, column=1, sticky="ew", pady=2)
 
         self._form_label(horizontal, "Position %", 1)
-        self._dark_entry(horizontal, self.horizontal_position_var, 9).grid(
-            row=1, column=1, sticky="ew", pady=3
+        self._dark_entry(horizontal, self.horizontal_position_var, 7).grid(
+            row=1, column=1, sticky="ew", pady=2
         )
         horizontal.columnconfigure(1, weight=1)
 
         ttk.Button(
-            inner,
+            outer,
             text="APPLY HORIZONTAL",
             command=self._apply_horizontal,
             style="Dark.TButton",
-        ).pack(fill="x", padx=10, pady=(6, 4))
+        ).pack(fill="x", padx=8, pady=(3, 4))
 
-        self._section_label(inner, "TRIGGER", top_pad=16)
-
-        trigger = tk.Frame(inner, bg="#111820")
-        trigger.pack(fill="x", padx=10)
+        self._section_label(outer, "TRIGGER", top_pad=5)
+        trigger = tk.Frame(outer, bg="#111820")
+        trigger.pack(fill="x", padx=8)
 
         self._form_label(trigger, "Source", 0)
         ttk.Combobox(
@@ -638,12 +618,12 @@ class MSO4ScopeApp:
             values=["CH1", "CH2", "CH3", "CH4"],
             state="readonly",
             style="Dark.TCombobox",
-            width=12,
-        ).grid(row=0, column=1, sticky="ew", pady=3)
+            width=10,
+        ).grid(row=0, column=1, sticky="ew", pady=2)
 
         self._form_label(trigger, "Level V", 1)
-        self._dark_entry(trigger, self.trigger_level_var, 9).grid(
-            row=1, column=1, sticky="ew", pady=3
+        self._dark_entry(trigger, self.trigger_level_var, 7).grid(
+            row=1, column=1, sticky="ew", pady=2
         )
 
         self._form_label(trigger, "Slope", 2)
@@ -653,8 +633,8 @@ class MSO4ScopeApp:
             values=["RISE", "FALL", "EITHER"],
             state="readonly",
             style="Dark.TCombobox",
-            width=12,
-        ).grid(row=2, column=1, sticky="ew", pady=3)
+            width=10,
+        ).grid(row=2, column=1, sticky="ew", pady=2)
 
         self._form_label(trigger, "Mode", 3)
         ttk.Combobox(
@@ -663,28 +643,25 @@ class MSO4ScopeApp:
             values=["AUTO", "NORMAL"],
             state="readonly",
             style="Dark.TCombobox",
-            width=12,
-        ).grid(row=3, column=1, sticky="ew", pady=3)
-
+            width=10,
+        ).grid(row=3, column=1, sticky="ew", pady=2)
         trigger.columnconfigure(1, weight=1)
 
         ttk.Button(
-            inner,
+            outer,
             text="APPLY TRIGGER",
             command=self._apply_trigger,
             style="Dark.TButton",
-        ).pack(fill="x", padx=10, pady=(6, 3))
+        ).pack(fill="x", padx=8, pady=(3, 2))
 
-        trig_buttons = tk.Frame(inner, bg="#111820")
-        trig_buttons.pack(fill="x", padx=10)
-
+        trig_buttons = tk.Frame(outer, bg="#111820")
+        trig_buttons.pack(fill="x", padx=8)
         ttk.Button(
             trig_buttons,
             text="50%",
             command=self._trigger_50,
             style="Dark.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(0, 2))
-
         ttk.Button(
             trig_buttons,
             text="FORCE",
@@ -692,7 +669,15 @@ class MSO4ScopeApp:
             style="Dark.TButton",
         ).pack(side="left", fill="x", expand=True, padx=(2, 0))
 
-        self._section_label(inner, "MEASUREMENTS", top_pad=16)
+        self._section_label(outer, "MEASUREMENTS", top_pad=7)
+
+        table = tk.Frame(
+            outer,
+            bg="#161E27",
+            highlightbackground="#273441",
+            highlightthickness=1,
+        )
+        table.pack(fill="x", padx=8, pady=2)
 
         fields = [
             ("pkpk", "Vpp"),
@@ -703,51 +688,59 @@ class MSO4ScopeApp:
             ("max", "Max"),
         ]
 
-        for ch, color in CHANNEL_COLORS.items():
-            card = tk.Frame(
-                inner,
-                bg="#161E27",
-                highlightbackground="#273441",
-                highlightthickness=1,
-            )
-            card.pack(fill="x", padx=10, pady=4)
-
+        tk.Label(table, text="", bg="#161E27").grid(row=0, column=0, padx=3, pady=2)
+        for col, (ch, color) in enumerate(CHANNEL_COLORS.items(), start=1):
             tk.Label(
-                card,
+                table,
                 text=ch,
                 bg="#161E27",
                 fg=color,
-                font=("Arial", 10, "bold"),
-            ).grid(row=0, column=0, columnspan=2, sticky="w", padx=7, pady=(5, 2))
+                font=("Arial", 8, "bold"),
+            ).grid(row=0, column=col, padx=3, pady=2)
 
-            vars_for_ch: dict[str, tk.StringVar] = {}
-            for idx, (key, label) in enumerate(fields, start=1):
-                tk.Label(
-                    card,
-                    text=label,
-                    bg="#161E27",
-                    fg="#B9C0C8",
-                ).grid(row=idx, column=0, sticky="w", padx=7, pady=1)
+        for row, (key, caption) in enumerate(fields, start=1):
+            tk.Label(
+                table,
+                text=caption,
+                bg="#161E27",
+                fg="#AEB8C2",
+                font=("Arial", 8),
+                anchor="w",
+            ).grid(row=row, column=0, sticky="w", padx=4, pady=1)
 
+            for col, ch in enumerate(CHANNEL_COLORS, start=1):
+                if ch not in self.measure_vars:
+                    self.measure_vars[ch] = {}
                 var = tk.StringVar(value="--")
+                self.measure_vars[ch][key] = var
                 tk.Label(
-                    card,
+                    table,
                     textvariable=var,
                     bg="#161E27",
                     fg="#F0F4F8",
-                    font=("Menlo", 9, "bold"),
-                ).grid(row=idx, column=1, sticky="e", padx=7, pady=1)
-                vars_for_ch[key] = var
+                    font=("Menlo", 7),
+                    width=8,
+                    anchor="e",
+                ).grid(row=row, column=col, padx=2, pady=1)
 
-            card.columnconfigure(1, weight=1)
-            self.measure_vars[ch] = vars_for_ch
+        for col in range(1, 5):
+            table.columnconfigure(col, weight=1)
 
         ttk.Button(
-            inner,
+            outer,
             text="REFRESH SETTINGS",
             command=self._refresh_settings,
             style="Dark.TButton",
-        ).pack(fill="x", padx=10, pady=(14, 10))
+        ).pack(fill="x", padx=8, pady=(6, 5))
+
+        tk.Label(
+            outer,
+            text="Wheel: Time/div   |   Shift+Wheel: selected CH V/div",
+            bg="#111820",
+            fg="#708090",
+            font=("Arial", 8),
+            anchor="center",
+        ).pack(fill="x", padx=8, pady=(2, 5))
 
         return outer
 
