@@ -103,6 +103,7 @@ class MSO4ScopeApp:
         self._last_draw = 0.0
         self._wheel_after_id = None
         self._selected_channel = "CH1"
+        self.display_offset_div = {ch: 0.0 for ch in CHANNEL_COLORS}
 
         self.ip_var = tk.StringVar(value="192.168.1.133")
         self.status_var = tk.StringVar(value="Disconnected")
@@ -530,6 +531,20 @@ class MSO4ScopeApp:
 
         ttk.Button(
             info,
+            text="4CH STACK",
+            command=self._stack_four_channels,
+            style="Dark.TButton",
+        ).pack(side="right", padx=3)
+
+        ttk.Button(
+            info,
+            text="CENTER CH",
+            command=self._center_selected_channel,
+            style="Dark.TButton",
+        ).pack(side="right", padx=3)
+
+        ttk.Button(
+            info,
             text="AUTO SCALE",
             command=self._autoscale,
             style="Dark.TButton",
@@ -735,7 +750,7 @@ class MSO4ScopeApp:
 
         tk.Label(
             outer,
-            text="Wheel: Time/div   |   Shift+Wheel: selected CH V/div",
+            text="Wheel: move selected CH | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div",
             bg="#111820",
             fg="#708090",
             font=("Arial", 8),
@@ -1366,6 +1381,7 @@ class MSO4ScopeApp:
 
             xp = (xd - xmin) / xspan * width
             yp = height - (yd - ymin) / yspan * height
+            yp = yp - self.display_offset_div.get(ch, 0.0) * (height / 8.0)
 
             coords = np.column_stack((xp, yp)).ravel().tolist()
             c.create_line(
@@ -1417,6 +1433,7 @@ class MSO4ScopeApp:
 
             baseline = float(np.mean(y))
             py = height - (baseline - ymin) / span * height
+            py = py - self.display_offset_div.get(ch, 0.0) * (height / 8.0)
             py = max(8, min(height - 8, py))
 
             self.canvas.create_polygon(
@@ -1432,7 +1449,7 @@ class MSO4ScopeApp:
             self.canvas.create_text(
                 15,
                 py,
-                text=ch[-1],
+                text=(f"{ch[-1]}*" if ch == self._selected_channel else ch[-1]),
                 fill=CHANNEL_COLORS[ch],
                 anchor="w",
                 font=("Arial", 8, "bold"),
@@ -1619,7 +1636,44 @@ class MSO4ScopeApp:
     def _select_channel(self, channel: str) -> None:
         if channel in CHANNEL_COLORS:
             self._selected_channel = channel
-            self.status_var.set(f"Selected {channel}")
+            self.status_var.set(
+                f"Selected {channel} | display {self.display_offset_div.get(channel, 0.0):+.2f} div"
+            )
+            self._redraw_scope()
+
+    def _stack_four_channels(self) -> None:
+        # Four local display lanes. These offsets do not modify waveform values.
+        offsets = {
+            "CH1": 3.0,
+            "CH2": 1.0,
+            "CH3": -1.0,
+            "CH4": -3.0,
+        }
+        self.display_offset_div.update(offsets)
+
+        for ch in CHANNEL_COLORS:
+            self.channel_vars[ch].set(True)
+
+        if self.client and self.client.connected:
+            def command() -> None:
+                for ch in CHANNEL_COLORS:
+                    self.client.set_channel_state(ch, True)
+
+            self._run_async("4CH enabled", command)
+
+        if self.acq_thread and self.acq_thread.is_alive():
+            self._stop_acquisition(local_only=True)
+            self.root.after(100, self._start_acquisition)
+        else:
+            self._redraw_scope()
+
+        self.status_var.set("4CH STACK: CH1 +3, CH2 +1, CH3 -1, CH4 -3 div")
+
+    def _center_selected_channel(self) -> None:
+        ch = self._selected_channel
+        self.display_offset_div[ch] = 0.0
+        self.status_var.set(f"{ch} display centered")
+        self._redraw_scope()
 
     @staticmethod
     def _wheel_direction(event) -> int:
@@ -1637,17 +1691,21 @@ class MSO4ScopeApp:
         return "break"
 
     def _on_scope_wheel(self, event) -> str:
-        if not self.client or not self.client.connected:
-            return "break"
-
         direction = self._wheel_direction(event)
         if direction == 0:
             return "break"
 
-        shift = bool(getattr(event, "state", 0) & 0x0001)
+        state = int(getattr(event, "state", 0))
+        shift = bool(state & 0x0001)
+        # Tk maps Ctrl/Command to different modifier masks by platform.
+        time_modifier = bool(state & (0x0004 | 0x0008 | 0x0010 | 0x0040))
+
+        ch = self._selected_channel
 
         if shift:
-            ch = self._selected_channel
+            if not self.client or not self.client.connected:
+                return "break"
+
             try:
                 current = self._parse_vdiv(self.channel_scale_vars[ch].get())
             except Exception:
@@ -1657,13 +1715,15 @@ class MSO4ScopeApp:
                 range(len(VERTICAL_SCALES)),
                 key=lambda i: abs(VERTICAL_SCALES[i] - current),
             )
-            # Wheel up = finer V/div, wheel down = coarser V/div.
             idx = max(0, min(len(VERTICAL_SCALES) - 1, idx - direction))
             new_value = VERTICAL_SCALES[idx]
             self.channel_scale_vars[ch].set(self._format_vdiv(new_value))
             self._schedule_wheel_apply("vertical", ch, new_value)
 
-        else:
+        elif time_modifier:
+            if not self.client or not self.client.connected:
+                return "break"
+
             try:
                 current = self._parse_time_div(self.time_scale_var.get())
             except Exception:
@@ -1673,11 +1733,21 @@ class MSO4ScopeApp:
                 range(len(TIME_SCALES)),
                 key=lambda i: abs(TIME_SCALES[i] - current),
             )
-            # Wheel up = zoom in (smaller time/div), wheel down = zoom out.
             idx = max(0, min(len(TIME_SCALES) - 1, idx - direction))
             new_value = TIME_SCALES[idx]
             self.time_scale_var.set(self._format_time_div(new_value))
             self._schedule_wheel_apply("horizontal", None, new_value)
+
+        else:
+            # Local display-only move: raw oscilloscope waveform data is untouched.
+            current = self.display_offset_div.get(ch, 0.0)
+            current += direction * 0.25
+            current = max(-4.0, min(4.0, current))
+            self.display_offset_div[ch] = current
+            self.status_var.set(
+                f"{ch} display position: {current:+.2f} div"
+            )
+            self._redraw_scope()
 
         return "break"
 
