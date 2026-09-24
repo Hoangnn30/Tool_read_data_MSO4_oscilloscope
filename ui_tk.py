@@ -106,10 +106,10 @@ class MSO4ScopeApp:
         self.transfer_var = tk.StringVar(value="No waveform data yet")
         self.cursor_var = tk.StringVar(value="t = --    V = --")
 
-        self.points_var = tk.StringVar(value="5000")
-        self.refresh_var = tk.StringVar(value="50")
+        self.points_var = tk.StringVar(value="2500")
+        self.refresh_var = tk.StringVar(value="30")
         self.fast_mode_var = tk.BooleanVar(value=True)
-        self.fast_record_var = tk.StringVar(value="10000")
+        self.fast_record_var = tk.StringVar(value="5000")
         self.get_full_record_var = tk.BooleanVar(value=True)
 
         self.channel_vars = {
@@ -1004,7 +1004,7 @@ class MSO4ScopeApp:
             try:
                 self.client.single_acquisition()
                 self.client.wait_for_acquisition_complete(timeout=3.0)
-                self._acquire_one_frame(channels, points)
+                self._acquire_one_frame(channels, points, exact=True)
                 self.command_queue.put(("single_done",))
             except Exception as exc:
                 self.command_queue.put(("acq_error", f"Single: {exc}"))
@@ -1040,7 +1040,7 @@ class MSO4ScopeApp:
 
         def worker() -> None:
             try:
-                successful = self._acquire_one_frame(channels, points)
+                successful = self._acquire_one_frame(channels, points, exact=False)
                 if successful == 0:
                     errors = " | ".join(
                         f"{ch}: {msg}" for ch, msg in self.channel_errors.items()
@@ -1168,7 +1168,12 @@ class MSO4ScopeApp:
         self.acq_thread = threading.Thread(target=worker, daemon=True)
         self.acq_thread.start()
 
-    def _acquire_one_frame(self, channels: list[str], points: int) -> int:
+    def _acquire_one_frame(
+        self,
+        channels: list[str],
+        points: int,
+        exact: bool = False,
+    ) -> int:
         successful = 0
 
         for ch in channels:
@@ -1176,7 +1181,10 @@ class MSO4ScopeApp:
                 break
 
             try:
-                waveform = self.client.get_waveform(ch, 1, points)
+                if exact:
+                    waveform = self.client.get_waveform(ch, 1, points)
+                else:
+                    waveform = self.client.get_waveform_fast(ch, 1, points)
                 info = self.client.get_last_transfer_info(ch)
                 measurements = waveform.measurements()
 
