@@ -110,6 +110,7 @@ class MSO4ScopeApp:
         self.refresh_var = tk.StringVar(value="50")
         self.fast_mode_var = tk.BooleanVar(value=True)
         self.fast_record_var = tk.StringVar(value="10000")
+        self.get_full_record_var = tk.BooleanVar(value=True)
 
         self.channel_vars = {
             ch: tk.BooleanVar(value=(ch == "CH1"))
@@ -395,6 +396,18 @@ class MSO4ScopeApp:
             activeforeground="#F0F4F8",
         )
         fast_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(5, 2))
+
+        full_cb = tk.Checkbutton(
+            acq,
+            text="GET DATA = full record",
+            variable=self.get_full_record_var,
+            bg="#111820",
+            fg="#D7DEE7",
+            selectcolor="#0B1016",
+            activebackground="#111820",
+            activeforeground="#F0F4F8",
+        )
+        full_cb.grid(row=6, column=0, columnspan=2, sticky="w", pady=(2, 2))
 
         acq.columnconfigure(1, weight=1)
 
@@ -1013,12 +1026,17 @@ class MSO4ScopeApp:
         except ValueError:
             points = 5000
 
+        if self.get_full_record_var.get():
+            record = self.client.get_record_length()
+            if record and record > 0:
+                points = record
+
         was_running = bool(self.acq_thread and self.acq_thread.is_alive())
         if was_running:
             self._stop_acquisition(local_only=True)
 
-        self.status_var.set("GET DATA: reading current waveform...")
-        self.transfer_var.set("Reading waveform snapshot...")
+        self.status_var.set(f"GET DATA: reading {points} points...")
+        self.transfer_var.set(f"Reading exact waveform snapshot ({points} pts)...")
 
         def worker() -> None:
             try:
@@ -1216,9 +1234,15 @@ class MSO4ScopeApp:
                 mode = info.get("mode", "?")
                 npts = info.get("points", len(y))
                 record = info.get("record_length")
+                t0 = info.get("time_start")
+                t1 = info.get("time_stop")
+                range_text = ""
+                if t0 is not None and t1 is not None:
+                    range_text = f" | {self._format_time(float(t0))} .. {self._format_time(float(t1))}"
                 latest_status = (
                     f"{ch}: {npts} pts {mode}"
                     + (f" | record {record}" if record else "")
+                    + range_text
                 )
 
             if latest_status:
