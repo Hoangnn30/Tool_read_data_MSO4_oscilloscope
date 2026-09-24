@@ -60,6 +60,8 @@ class MSO4Client:
         self._record_length_cache: int | None = None
         self.active_resource_name: str | None = None
         self.active_transport: str | None = None
+        self._realtime_saved_record_length: int | None = None
+        self._realtime_time_scale: float | None = None
 
     @property
     def connected(self) -> bool:
@@ -241,18 +243,28 @@ class MSO4Client:
         ch = self._validate_channel(channel)
         self.write(f"DISPLAY:WAVEVIEW1:{ch}:STATE {'ON' if enabled else 'OFF'}")
 
-    def set_channel_scale(self, channel: str, volts_per_div: float) -> None:
+    def set_channel_scale(self, channel: str, volts_per_div: float) -> float:
+        """Set and read back the actual displayed V/div value."""
         ch = self._validate_channel(channel)
         value = float(volts_per_div)
         if value <= 0:
             raise ValueError("Vertical scale must be > 0.")
-        self.write(f"{ch}:SCALE {value:.12g}")
-        self.invalidate_waveform_cache()
 
-    def set_channel_position(self, channel: str, divisions: float) -> None:
-        ch = self._validate_channel(channel)
-        self.write(f"{ch}:POSITION {float(divisions):.12g}")
+        command = f"DISPLAY:WAVEVIEW1:{ch}:VERTICAL:SCALE"
+        self.write(f"{command} {value:.12g}")
+        actual = self.query_float(f"{command}?")
         self.invalidate_waveform_cache()
+        return actual
+
+    def set_channel_position(self, channel: str, divisions: float) -> float:
+        """Set and read back vertical position in divisions."""
+        ch = self._validate_channel(channel)
+        value = float(divisions)
+        command = f"DISPLAY:WAVEVIEW1:{ch}:VERTICAL:POSITION"
+        self.write(f"{command} {value:.12g}")
+        actual = self.query_float(f"{command}?")
+        self.invalidate_waveform_cache()
+        return actual
 
     def set_channel_offset(self, channel: str, volts: float) -> None:
         ch = self._validate_channel(channel)
@@ -267,18 +279,88 @@ class MSO4Client:
         self.write(f"{ch}:COUPLING {value}")
         self.invalidate_waveform_cache()
 
-    def set_horizontal_scale(self, seconds_per_div: float) -> None:
+    def set_horizontal_scale(self, seconds_per_div: float) -> float:
+        """Set Time/div and return the actual value accepted by the scope."""
         value = float(seconds_per_div)
         if value <= 0:
             raise ValueError("Horizontal scale must be > 0.")
+
         self.write(f"HORIZONTAL:MODE:SCALE {value:.12g}")
+        actual = self.query_float("HORIZONTAL:MODE:SCALE?")
+
+        # If realtime mode temporarily shortened the record, preserve the
+        # user's latest Time/div when the original record length is restored.
+        if self._realtime_saved_record_length is not None:
+            self._realtime_time_scale = actual
+
         self._record_length_cache = None
         self.invalidate_waveform_cache()
+        return actual
 
     def set_horizontal_position(self, percent: float) -> None:
         value = max(0.0, min(100.0, float(percent)))
         self.write(f"HORIZONTAL:POSITION {value:.12g}")
         self.invalidate_waveform_cache()
+
+    def enter_realtime_mode(self, record_points: int = 5000) -> dict[str, float | int | None]:
+        """Temporarily shorten the acquisition record without changing Time/div.
+
+        TekHSI transfers the acquired record. Keeping the realtime record small
+        lowers first-frame latency and bandwidth. The user's horizontal scale is
+        explicitly reapplied and read back after the record-length change.
+        """
+        target = max(1000, int(record_points))
+
+        if self._realtime_saved_record_length is None:
+            self._realtime_saved_record_length = self.get_record_length(force=True)
+
+        requested_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+        self._realtime_time_scale = requested_scale
+
+        self.write("HORIZONTAL:MODE MANUAL")
+        self.write(f"HORIZONTAL:MODE:RECORDLENGTH {target}")
+        self.write(f"HORIZONTAL:MODE:SCALE {requested_scale:.12g}")
+
+        actual_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+        actual_record = self.get_record_length(force=True)
+
+        self.invalidate_waveform_cache()
+        return {
+            "record_length": actual_record,
+            "horizontal_scale": actual_scale,
+        }
+
+    def exit_realtime_mode(self) -> dict[str, float | int | None]:
+        """Restore the pre-realtime record length while retaining current Time/div."""
+        saved_record = self._realtime_saved_record_length
+        keep_scale = self._realtime_time_scale
+
+        if saved_record is None:
+            return {
+                "record_length": self.get_record_length(),
+                "horizontal_scale": (
+                    self.query_float("HORIZONTAL:MODE:SCALE?")
+                    if self.connected
+                    else None
+                ),
+            }
+
+        self.write("HORIZONTAL:MODE MANUAL")
+        self.write(f"HORIZONTAL:MODE:RECORDLENGTH {int(saved_record)}")
+        if keep_scale is not None:
+            self.write(f"HORIZONTAL:MODE:SCALE {keep_scale:.12g}")
+
+        actual_record = self.get_record_length(force=True)
+        actual_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+
+        self._realtime_saved_record_length = None
+        self._realtime_time_scale = None
+        self.invalidate_waveform_cache()
+
+        return {
+            "record_length": actual_record,
+            "horizontal_scale": actual_scale,
+        }
 
     def set_record_length(self, points: int, preserve_scale: bool = True) -> int:
         value = max(1000, int(points))
@@ -484,11 +566,11 @@ class MSO4Client:
             except Exception:
                 pass
             try:
-                values["scale"] = self.query_float(f"{ch}:SCALE?")
+                values["scale"] = self.query_float(f"DISPLAY:WAVEVIEW1:{ch}:VERTICAL:SCALE?")
             except Exception:
                 pass
             try:
-                values["position"] = self.query_float(f"{ch}:POSITION?")
+                values["position"] = self.query_float(f"DISPLAY:WAVEVIEW1:{ch}:VERTICAL:POSITION?")
             except Exception:
                 pass
             try:
