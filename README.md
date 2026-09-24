@@ -118,3 +118,41 @@ voltage = (raw_sample - YOFF) * YMULT + YZERO
     ├── scpi.py
     └── waveform.py
 ```
+
+## Recommended waveform architecture: TekHSI first
+
+For Tektronix MSO44B / 4 Series B, realtime waveform transfer should use TekHSI on port 5000. VISA/SCPI remains the control plane for RUN/STOP, channel state, V/div, Time/div, trigger and setup.
+
+Recommended runtime:
+
+```bash
+brew install python@3.13 python-tk@3.13
+
+rm -rf .venv
+"$(brew --prefix python@3.13)/bin/python3.13" -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Verify:
+
+```bash
+python --version
+python -c "import tekhsi; print('TekHSI OK')"
+```
+
+Expected Python version: 3.13.x.
+
+On the oscilloscope enable the High Speed Interface and use the default TekHSI endpoint:
+
+```text
+192.168.1.133:5000
+```
+
+The application uses:
+- TekHSI first for realtime multi-channel waveform data.
+- VISA/SCPI for instrument control.
+- SCPI CURVE? only as a waveform fallback if TekHSI is unavailable.
+
