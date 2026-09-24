@@ -140,6 +140,7 @@ class MSO4ScopeApp:
         self.channel_badge_labels: dict[str, tk.Label] = {}
         self.time_badge_var = tk.StringVar(value="M  1 ms/div")
         self.trigger_badge_var = tk.StringVar(value="T  CH1  0 V  @ 50%")
+        self.scope_sync_var = tk.StringVar(value="SCALE --")
 
         self.time_scale_var = tk.StringVar(value="1 ms/div")
         self.horizontal_position_var = tk.StringVar(value="50")
@@ -767,6 +768,17 @@ class MSO4ScopeApp:
             pady=4,
         ).pack(side="left", padx=2)
 
+        self.scope_sync_label = tk.Label(
+            time_bar,
+            textvariable=self.scope_sync_var,
+            bg="#151C23",
+            fg="#7E8C99",
+            font=("Menlo", 8, "bold"),
+            padx=7,
+            pady=4,
+        )
+        self.scope_sync_label.pack(side="left", padx=2)
+
         return frame
 
     def _build_right_panel(self, parent) -> tk.Frame:
@@ -1087,6 +1099,7 @@ class MSO4ScopeApp:
             self.client.set_channel_offset(ch, offset)
             self.client.set_channel_coupling(ch, coupling)
 
+        self.scope_sync_var.set("SCALE PENDING")
         self._run_async(f"Applying {ch}", command, refresh_settings=True)
 
     def _apply_horizontal(self) -> None:
@@ -1101,6 +1114,7 @@ class MSO4ScopeApp:
             self.client.set_horizontal_scale(scale)
             self.client.set_horizontal_position(position)
 
+        self.scope_sync_var.set("SCALE PENDING")
         self._run_async("Applying horizontal", command, refresh_settings=True)
 
     def _apply_trigger(self) -> None:
@@ -1464,6 +1478,30 @@ class MSO4ScopeApp:
             if latest_status:
                 self.transfer_var.set(latest_status)
 
+            # Verify that transferred samples cover the complete visible window.
+            try:
+                visible_span = 10.0 * self._parse_time_div(self.time_scale_var.get())
+            except Exception:
+                visible_span = 0.0
+
+            spans = []
+            for _ch, (_x, _y, _m, _info) in frames.items():
+                _t0 = _info.get("time_start")
+                _t1 = _info.get("time_stop")
+                if _t0 is not None and _t1 is not None:
+                    spans.append(abs(float(_t1) - float(_t0)))
+
+            if visible_span > 0.0 and spans:
+                max_span = max(spans)
+                if max_span >= visible_span * 0.98:
+                    self.scope_sync_var.set("SCALE SYNC")
+                    if hasattr(self, "scope_sync_label"):
+                        self.scope_sync_label.configure(bg="#142019", fg="#72D99A")
+                else:
+                    self.scope_sync_var.set("TIME SPAN !")
+                    if hasattr(self, "scope_sync_label"):
+                        self.scope_sync_label.configure(bg="#35181B", fg="#FF7680")
+
             now = time.monotonic()
             # Cap drawing around 30 FPS even when LAN acquisition is faster.
             if now - self._last_draw >= 1.0 / 30.0:
@@ -1492,10 +1530,11 @@ class MSO4ScopeApp:
             return default
 
     def _scope_geometry(self, width: int, height: int) -> dict[str, float]:
-        left = 5.0
-        right = max(left + 10.0, float(width) - 5.0)
-        top = 5.0
-        bottom = max(top + 8.0, float(height) - 18.0)
+        # Extra margins hold exact numeric Time/div and selected-channel V/div rulers.
+        left = 68.0
+        right = max(left + 100.0, float(width) - 10.0)
+        top = 12.0
+        bottom = max(top + 80.0, float(height) - 30.0)
         plot_w = right - left
         plot_h = bottom - top
         return {
@@ -1521,6 +1560,7 @@ class MSO4ScopeApp:
 
         c.delete("all")
         self._draw_grid(width, height, g)
+        self._draw_scale_rulers(g)
 
         active = [
             ch
@@ -1699,6 +1739,67 @@ class MSO4ScopeApp:
             fill="#526474",
             anchor="e",
             font=("Menlo", 7),
+        )
+
+    def _draw_scale_rulers(self, g: dict[str, float]) -> None:
+        """Render exact major-division rulers from current MSO44B settings."""
+        try:
+            time_div = self._parse_time_div(self.time_scale_var.get())
+        except Exception:
+            time_div = 1e-3
+        time_div = max(abs(time_div), 1e-15)
+
+        hpos = self._safe_float(self.horizontal_position_var.get(), 50.0)
+        hpos = max(0.0, min(100.0, hpos))
+        trigger_x = g["left"] + (hpos / 100.0) * g["width"]
+
+        # Every vertical major line is exactly one Time/div.
+        for i in range(11):
+            x = g["left"] + i * g["x_div"]
+            t = ((x - trigger_x) / g["x_div"]) * time_div
+            is_zero = abs(t) <= time_div * 0.02
+            self.canvas.create_text(
+                x,
+                g["bottom"] + 11,
+                text=self._format_time(t),
+                fill=("#E4EAF0" if is_zero else "#6F8192"),
+                anchor="n",
+                font=("Menlo", 7, "bold" if is_zero else "normal"),
+            )
+
+        ch = self._selected_channel
+        try:
+            volts_div = self._parse_vdiv(self.channel_scale_vars[ch].get())
+        except Exception:
+            volts_div = 1.0
+        volts_div = max(abs(volts_div), 1e-15)
+
+        position = self._safe_float(self.channel_position_vars[ch].get(), 0.0)
+        offset_v = self._safe_float(self.channel_offset_vars[ch].get(), 0.0)
+        color = CHANNEL_COLORS[ch]
+
+        # Every horizontal major line is exactly one V/div for selected channel.
+        for i in range(9):
+            y = g["top"] + i * g["y_div"]
+            screen_div = (g["center_y"] - y) / g["y_div"]
+            volts = (screen_div - position) * volts_div + offset_v
+            self.canvas.create_text(
+                g["left"] - 7,
+                y,
+                text=self._format_voltage(volts),
+                fill=color,
+                anchor="e",
+                font=("Menlo", 7),
+            )
+
+        self.canvas.create_text(
+            6,
+            g["top"],
+            text=f"{ch}\n{self.channel_scale_vars[ch].get()}",
+            fill=color,
+            anchor="nw",
+            justify="left",
+            font=("Menlo", 8, "bold"),
         )
 
     def _draw_channel_reference_marker(
@@ -2012,6 +2113,10 @@ class MSO4ScopeApp:
                     if coupling in {"DC", "AC"}:
                         self.channel_coupling_vars[ch].set(coupling)
 
+        self.scope_sync_var.set("SCALE SYNC")
+        if hasattr(self, "scope_sync_label"):
+            self.scope_sync_label.configure(bg="#142019", fg="#72D99A")
+
         if hasattr(self, "canvas"):
             self._redraw_scope()
 
@@ -2153,6 +2258,10 @@ class MSO4ScopeApp:
         channel: str | None,
         value: float,
     ) -> None:
+        self.scope_sync_var.set("SCALE PENDING")
+        if hasattr(self, "scope_sync_label"):
+            self.scope_sync_label.configure(bg="#2A2111", fg="#F6B94A")
+
         if self._wheel_after_id is not None:
             try:
                 self.root.after_cancel(self._wheel_after_id)
