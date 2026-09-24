@@ -109,6 +109,9 @@ class MSO4ScopeApp:
         self._closing = False
         self._last_draw = 0.0
         self._scope_static_key = None
+        self._wave_items: dict[str, int] = {}
+        self._last_measure_update = {ch: 0.0 for ch in CHANNEL_COLORS}
+        self._last_status_update = 0.0
         self._wheel_after_id = None
         self._selected_channel = "CH1"
         self.display_offset_div = {ch: 0.0 for ch in CHANNEL_COLORS}
@@ -123,7 +126,7 @@ class MSO4ScopeApp:
         self.points_var = tk.StringVar(value="2500")
         self.refresh_var = tk.StringVar(value="30")
         self.fast_mode_var = tk.BooleanVar(value=True)
-        self.fast_record_var = tk.StringVar(value="2500")
+        self.fast_record_var = tk.StringVar(value="1500")
         self.get_full_record_var = tk.BooleanVar(value=True)
 
         self.channel_vars = {
@@ -172,7 +175,7 @@ class MSO4ScopeApp:
         self._select_channel("CH1")
 
         self.root.after(30, self._process_command_queue)
-        self.root.after(30, self._render_latest_frames)
+        self.root.after(16, self._render_latest_frames)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -1315,6 +1318,7 @@ class MSO4ScopeApp:
         self.x_range = None
         self.y_range = None
         self._scope_static_key = None
+        self._wave_items.clear()
         self._redraw_scope()
 
     def _run_async(self, description: str, fn, refresh_settings: bool = False) -> None:
@@ -1624,34 +1628,57 @@ class MSO4ScopeApp:
                 self.command_queue.put(("acq_error", f"Cannot start acquisition: {exc}"))
                 return
 
-            last_report = time.monotonic()
-            frames = 0
+            # Prime each enabled channel once so WFMOUTPRE/RESAMPLE queries
+            # happen only at startup or after a scale change.
+            try:
+                for ch in channels:
+                    if self.stop_event.is_set():
+                        return
+                    self.client.prepare_fast_waveform(ch, 1, points)
+            except Exception:
+                # get_waveform_fast() can still rebuild an individual cache.
+                pass
 
+            last_report = time.monotonic()
+            updates = 0
+            channel_index = 0
+            consecutive_failures = 0
+            per_tick_ms = max(2.0, refresh_ms / max(1, len(channels)))
+
+            # Round-robin: one CURVE? transaction per loop. This avoids waiting
+            # for all 4 channels before the UI gets a new frame.
             while not self.stop_event.is_set():
                 started = time.monotonic()
-                successful = self._acquire_one_frame(channels, points, exact=False)
+                ch = channels[channel_index]
+                channel_index = (channel_index + 1) % len(channels)
 
-                if successful == 0:
-                    errors = " | ".join(
-                        f"{ch}: {msg}" for ch, msg in self.channel_errors.items()
-                    )
-                    self.command_queue.put(
-                        (
-                            "acq_error",
-                            "No selected channel returned waveform data. " + errors,
+                successful = self._acquire_one_frame([ch], points, exact=False)
+
+                if successful:
+                    consecutive_failures = 0
+                    updates += 1
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max(4, len(channels) * 3):
+                        errors = " | ".join(
+                            f"{c}: {msg}" for c, msg in self.channel_errors.items()
                         )
-                    )
-                    return
+                        self.command_queue.put(
+                            (
+                                "acq_error",
+                                "Repeated waveform read failures. " + errors,
+                            )
+                        )
+                        return
 
-                frames += 1
                 now = time.monotonic()
                 if now - last_report >= 1.0:
-                    self.command_queue.put(("rate", frames / (now - last_report)))
-                    frames = 0
+                    self.command_queue.put(("rate", updates / (now - last_report)))
+                    updates = 0
                     last_report = now
 
                 elapsed_ms = (time.monotonic() - started) * 1000.0
-                remaining = max(0.0, refresh_ms - elapsed_ms)
+                remaining = max(0.0, per_tick_ms - elapsed_ms)
                 if remaining:
                     self.stop_event.wait(remaining / 1000.0)
 
@@ -1676,7 +1703,13 @@ class MSO4ScopeApp:
                 else:
                     waveform = self.client.get_waveform_fast(ch, 1, points)
                 info = self.client.get_last_transfer_info(ch)
-                measurements = waveform.measurements()
+
+                now = time.monotonic()
+                if exact or (now - self._last_measure_update.get(ch, 0.0) >= 0.20):
+                    measurements = waveform.measurements()
+                    self._last_measure_update[ch] = now
+                else:
+                    measurements = None
 
                 with self.frame_lock:
                     self.latest_frames[ch] = (
@@ -1726,8 +1759,9 @@ class MSO4ScopeApp:
 
             for ch, (x, y, measurements, info) in frames.items():
                 self.waveforms[ch] = (x, y)
-                self.measurements[ch] = measurements
-                self._update_measurements(ch, measurements)
+                if measurements is not None:
+                    self.measurements[ch] = measurements
+                    self._update_measurements(ch, measurements)
 
                 mode = info.get("mode", "?")
                 npts = info.get("points", len(y))
@@ -1745,36 +1779,43 @@ class MSO4ScopeApp:
                     + range_text
                 )
 
-            if latest_status:
-                self.transfer_var.set(latest_status)
-
-            # Verify that transferred samples cover the complete visible window.
-            try:
-                visible_span = 10.0 * self._parse_time_div(self.time_scale_var.get())
-            except Exception:
-                visible_span = 0.0
-
-            spans = []
-            for _ch, (_x, _y, _m, _info) in frames.items():
-                _t0 = _info.get("time_start")
-                _t1 = _info.get("time_stop")
-                if _t0 is not None and _t1 is not None:
-                    spans.append(abs(float(_t1) - float(_t0)))
-
-            if visible_span > 0.0 and spans:
-                max_span = max(spans)
-                if max_span >= visible_span * 0.98:
-                    self.scope_sync_var.set("SCALE SYNC")
-                    if hasattr(self, "scope_sync_label"):
-                        self.scope_sync_label.configure(bg="#142019", fg="#72D99A")
-                else:
-                    self.scope_sync_var.set("TIME SPAN !")
-                    if hasattr(self, "scope_sync_label"):
-                        self.scope_sync_label.configure(bg="#35181B", fg="#FF7680")
-
             now = time.monotonic()
+            if now - self._last_status_update >= 0.50:
+                if latest_status:
+                    self.transfer_var.set(latest_status)
+
+                # Validate time span at low rate; this does not need per-frame work.
+                try:
+                    visible_span = 10.0 * self._parse_time_div(
+                        self.time_scale_var.get()
+                    )
+                except Exception:
+                    visible_span = 0.0
+
+                spans = []
+                for _ch, (_x, _y, _m, _info) in frames.items():
+                    _t0 = _info.get("time_start")
+                    _t1 = _info.get("time_stop")
+                    if _t0 is not None and _t1 is not None:
+                        spans.append(abs(float(_t1) - float(_t0)))
+
+                if visible_span > 0.0 and spans:
+                    max_span = max(spans)
+                    if max_span >= visible_span * 0.98:
+                        self.scope_sync_var.set("SCALE SYNC")
+                        if hasattr(self, "scope_sync_label"):
+                            self.scope_sync_label.configure(
+                                bg="#142019", fg="#72D99A"
+                            )
+                    else:
+                        self.scope_sync_var.set("TIME SPAN !")
+                        if hasattr(self, "scope_sync_label"):
+                            self.scope_sync_label.configure(
+                                bg="#35181B", fg="#FF7680"
+                            )
+                self._last_status_update = now
             # Tk Canvas is most responsive when draw work stays below acquisition rate.
-            if now - self._last_draw >= 1.0 / 24.0:
+            if now - self._last_draw >= 1.0 / 30.0:
                 if self._need_autoscale:
                     self._autoscale()
                     self._need_autoscale = False
@@ -1843,18 +1884,26 @@ class MSO4ScopeApp:
 
         if static_changed:
             c.delete("all")
+            self._wave_items.clear()
             self._draw_grid(width, height, g)
             self._draw_scale_rulers(g)
             c.addtag_all("scope_static")
             self._scope_static_key = static_key
         else:
-            c.delete("wave_dynamic")
+            c.delete("scope_overlay")
 
         active = [
             ch
             for ch in CHANNEL_COLORS
             if self.channel_vars[ch].get() and ch in self.waveforms
         ]
+
+        for ch, item_id in list(self._wave_items.items()):
+            if ch not in active:
+                try:
+                    c.itemconfigure(item_id, state="hidden")
+                except tk.TclError:
+                    self._wave_items.pop(ch, None)
 
         try:
             time_div = self._parse_time_div(self.time_scale_var.get())
@@ -1875,7 +1924,7 @@ class MSO4ScopeApp:
             fill="#C88A2D",
             width=1,
             dash=(3, 4),
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
         c.create_polygon(
             trigger_x - 6,
@@ -1886,7 +1935,7 @@ class MSO4ScopeApp:
             g["top"] + 8,
             fill="#F1A93A",
             outline="",
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
 
         if not active:
@@ -1901,12 +1950,12 @@ class MSO4ScopeApp:
                 text=message,
                 fill="#566778",
                 font=("Arial", 13, "bold"),
-                tags=("wave_dynamic",),
+                tags=("scope_overlay",),
             )
             self._update_scope_badges()
             return
 
-        max_draw_points = max(500, min(5000, int(g["width"] * 2)))
+        max_draw_points = max(400, min(1800, int(g["width"] * 1.25)))
 
         for ch in active:
             x, y = self.waveforms[ch]
@@ -1949,13 +1998,24 @@ class MSO4ScopeApp:
             yp = g["center_y"] - screen_div * g["y_div"]
 
             coords = np.column_stack((xp, yp)).ravel().tolist()
-            c.create_line(
-                *coords,
-                fill=CHANNEL_COLORS[ch],
-                width=(2.4 if ch == self._selected_channel else 1.7),
-                smooth=False,
-                tags=("wave_dynamic",),
-            )
+            item_id = self._wave_items.get(ch)
+            if item_id is None:
+                item_id = c.create_line(
+                    *coords,
+                    fill=CHANNEL_COLORS[ch],
+                    width=(2.4 if ch == self._selected_channel else 1.7),
+                    smooth=False,
+                    tags=("wave_trace",),
+                )
+                self._wave_items[ch] = item_id
+            else:
+                c.coords(item_id, *coords)
+                c.itemconfigure(
+                    item_id,
+                    state="normal",
+                    fill=CHANNEL_COLORS[ch],
+                    width=(2.4 if ch == self._selected_channel else 1.7),
+                )
 
             self._draw_channel_reference_marker(
                 ch,
@@ -2118,7 +2178,7 @@ class MSO4ScopeApp:
             py + 7,
             fill=color,
             outline="",
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
         self.canvas.create_text(
             g["left"] + 14,
@@ -2127,7 +2187,7 @@ class MSO4ScopeApp:
             fill=color,
             anchor="w",
             font=("Arial", 7, "bold"),
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
 
     def _draw_trigger_level(self, g: dict[str, float]) -> None:
@@ -2164,7 +2224,7 @@ class MSO4ScopeApp:
             fill="#7A5825",
             width=1,
             dash=(2, 5),
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
         self.canvas.create_polygon(
             g["right"],
@@ -2175,7 +2235,7 @@ class MSO4ScopeApp:
             py + 6,
             fill="#F1A93A",
             outline="",
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
         self.canvas.create_text(
             g["right"] - 13,
@@ -2184,7 +2244,7 @@ class MSO4ScopeApp:
             fill="#F1A93A",
             anchor="e",
             font=("Arial", 7, "bold"),
-            tags=("wave_dynamic",),
+            tags=("scope_overlay",),
         )
 
     def _update_scope_badges(self) -> None:
