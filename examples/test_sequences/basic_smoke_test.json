@@ -1,0 +1,60 @@
+{
+  "name": "Basic IC Smoke Test",
+  "description": "Reusable sequence. Change IC values in the profile, not in this file.",
+  "steps": [
+    {
+      "name": "Power supply ID",
+      "device": "PWS-1",
+      "action": "query",
+      "params": {
+        "command": "*IDN?"
+      }
+    },
+    {
+      "name": "Set VDD",
+      "device": "PWS-1",
+      "action": "write",
+      "params": {
+        "command": "VOLT $profile.rails.vdd"
+      },
+      "delay_after_s": 0.1
+    },
+    {
+      "name": "Enable output",
+      "device": "PWS-1",
+      "action": "write",
+      "params": {
+        "command": "OUTP ON"
+      },
+      "delay_after_s": 0.2
+    },
+    {
+      "name": "Read DMM",
+      "device": "DMM-1",
+      "action": "get_data",
+      "params": {
+        "command": "READ?"
+      },
+      "save_as": "dmm_reading"
+    },
+    {
+      "name": "Capture clock waveform",
+      "device": "SCOPE-1",
+      "action": "get_data",
+      "params": {
+        "channel": "$profile.scope.clock_channel",
+        "points": 10000,
+        "exact": true
+      },
+      "save_as": "clock_waveform"
+    },
+    {
+      "name": "Disable output",
+      "device": "PWS-1",
+      "action": "write",
+      "params": {
+        "command": "OUTP OFF"
+      }
+    }
+  ]
+}

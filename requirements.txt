@@ -1,0 +1,4 @@
+numpy>=1.26,<3
+PyVISA>=1.14,<2
+PyVISA-py>=0.7,<1
+pyserial>=3.5,<4
