@@ -1,142 +1,86 @@
 # Tool_read_data_MSO4_oscilloscope
 
-Python/PyQt desktop oscilloscope client for Tektronix 4 Series MSO, focused on MSO44/MSO46 over LAN.
+Lightweight Python desktop oscilloscope client for Tektronix 4 Series MSO, focused on MSO44/MSO46 over TCPIP LAN.
 
-## Current MVP
+The GUI uses **Tkinter + Canvas**, so the project no longer depends on PyQt6 or pyqtgraph.
 
-- Connect to MSO44 by IP over raw TCP socket.
-- Default Tektronix Socket Server port: `4000`.
-- Read `*IDN?`.
-- Acquire CH1-CH4 waveforms using Tektronix SCPI.
-- Decode IEEE-488.2 binary waveform blocks.
-- Display waveforms in a PyQt6 + pyqtgraph oscilloscope-style UI.
-- Run/Stop acquisition without freezing the UI.
-- Enable/disable CH1-CH4.
-- Adjustable record length and refresh interval.
-- Cursor crosshair.
-- Auto-scale display.
-- Local measurements:
-  - Vpp
-  - Vrms
-  - Mean
-  - Min
-  - Max
-  - Frequency estimate
-- Manual SCPI query console.
-- Mock MSO4 server for development without physical hardware.
+## Features
 
-## Project structure
+- Connect to MSO44 through VISA TCPIP/LAN:
+  `TCPIP0::<IP>::inst0::INSTR`
+- Default target IP in the GUI: `192.168.1.133`
+- Read `*IDN?`
+- Acquire CH1-CH4 waveforms with Tektronix SCPI
+- Display waveforms on a lightweight Tkinter Canvas
+- Background acquisition thread so the GUI remains responsive
+- Run / Stop
+- Channel enable/disable
+- Adjustable point count and refresh interval
+- Auto-scale
+- Mouse cursor time/voltage readout
+- Vpp, Vrms, Mean, Min, Max and frequency estimate
+- Manual SCPI console
+
+## Dependencies
+
+Python packages:
 
 ```text
-.
-├── main.py
-├── mock_mso4.py
-├── requirements.txt
-├── mso4/
-│   ├── __init__.py
-│   ├── scpi.py
-│   └── waveform.py
-└── ui/
-    ├── __init__.py
-    └── main_window.py
+numpy
+PyVISA
+PyVISA-py
 ```
 
-## MSO44 LAN setup
-
-On the MSO44:
-
-1. Connect the oscilloscope LAN port to the same network as the computer.
-2. Open the instrument I/O/LAN settings and confirm the oscilloscope has an IP address.
-3. Enable the instrument Socket Server.
-4. Use TCP port `4000` unless you configured a different port.
-5. Verify the PC and oscilloscope are on reachable IP networks.
-
-Example:
-
-```text
-PC:    192.168.1.100
-MSO44: 192.168.1.120
-Port:  4000
-```
-
-Basic connectivity check:
+Tkinter is part of standard Python distributions. If you use Homebrew Python on macOS and `import tkinter` fails, install the matching Tk package. Example for Python 3.14:
 
 ```bash
-ping 192.168.1.120
-nc -vz 192.168.1.120 4000
+brew install python-tk@3.14
 ```
 
-## Install
-
-Python 3.11 or 3.12 is recommended.
-
-### macOS / Linux
+For Python 3.12:
 
 ```bash
-git clone https://github.com/Hoangnn30/Tool_read_data_MSO4_oscilloscope.git
-cd Tool_read_data_MSO4_oscilloscope
+brew install python-tk@3.12
+```
 
-python3 -m venv .venv
+## Install / update
+
+```bash
+git checkout feat/pyqt-mso44-lan
+git pull
+
 source .venv/bin/activate
-
-python -m pip install --upgrade pip
+pip uninstall -y PyQt6 PyQt6-Qt6 PyQt6-sip pyqtgraph
 pip install -r requirements.txt
 ```
 
-### Windows PowerShell
+Check Tkinter:
 
-```powershell
-git clone https://github.com/Hoangnn30/Tool_read_data_MSO4_oscilloscope.git
-cd Tool_read_data_MSO4_oscilloscope
-
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+```bash
+python -c "import tkinter; print('Tkinter OK', tkinter.TkVersion)"
 ```
 
-## Run with the real MSO44
+## Run
 
 ```bash
 python main.py
 ```
 
-Then:
-
-1. Enter the MSO44 IP address.
-2. Keep port `4000` unless the instrument uses another Socket Server port.
-3. Click **Connect**.
-4. A successful connection should show the instrument response to `*IDN?`.
-5. Enable the desired channels.
-6. Click **RUN**.
-
-## Run without hardware
-
-Terminal 1:
-
-```bash
-python mock_mso4.py
-```
-
-Terminal 2:
-
-```bash
-python main.py
-```
-
-Use:
+Enter:
 
 ```text
-IP:   127.0.0.1
-Port: 4000
+192.168.1.133
 ```
 
-The mock server generates sine waves on CH1-CH4 so the GUI and acquisition pipeline can be tested locally.
+The application connects using:
 
-## Waveform acquisition flow
+```text
+TCPIP0::192.168.1.133::inst0::INSTR
+```
 
-The client uses the Tektronix SCPI waveform-transfer flow:
+No HTTP port 80 and no raw socket port 4000 are required for this VISA TCPIP/LAN mode.
+
+## MSO44 waveform flow
 
 ```text
 DATA:SOURCE CH1
@@ -155,28 +99,22 @@ WFMOUTPRE:YOFF?
 CURVE?
 ```
 
-The returned integer samples are converted to engineering units using the waveform preamble:
+The returned samples are converted with the waveform preamble:
 
 ```text
 time = XZERO + (sample_index - PT_OFF) * XINCR
 voltage = (raw_sample - YOFF) * YMULT + YZERO
 ```
 
-## Notes
+## Project structure
 
-This first version intentionally keeps instrument writes limited. The main acquisition path reads the oscilloscope waveform and does not modify acquisition/trigger/channel configuration except for selecting the waveform source and transfer format.
-
-Possible next features:
-
-- Read instrument-side vertical scale and offset.
-- Read horizontal time/div and sample rate.
-- Trigger status and trigger controls.
-- Single acquisition.
-- Run/Stop the physical MSO44 from the application.
-- FFT view.
-- Measurement table using instrument-native measurements.
-- Save waveform CSV/NPY.
-- Screenshot capture.
-- Measurement logging.
-- LAN discovery/LXI discovery.
-- Multi-device support.
+```text
+.
+├── main.py
+├── ui_tk.py
+├── requirements.txt
+└── mso4/
+    ├── __init__.py
+    ├── scpi.py
+    └── waveform.py
+```
