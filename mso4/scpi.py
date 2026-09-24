@@ -56,6 +56,7 @@ class MSO4Client:
         self._lock = threading.RLock()
         self._last_transfer_info: dict[str, dict[str, object]] = {}
         self._fast_transfer_cache: dict[str, dict[str, object]] = {}
+        self._fast_active_source: str | None = None
 
     @property
     def connected(self) -> bool:
@@ -151,7 +152,7 @@ class MSO4Client:
         )
 
     def close(self) -> None:
-        self._fast_transfer_cache.clear()
+        self.invalidate_waveform_cache()
         inst, self._instrument = self._instrument, None
         if inst is not None:
             try:
@@ -222,6 +223,7 @@ class MSO4Client:
 
     def invalidate_waveform_cache(self) -> None:
         self._fast_transfer_cache.clear()
+        self._fast_active_source = None
 
     # ------------------------------------------------------------------
     # Front-panel style controls
@@ -544,6 +546,7 @@ class MSO4Client:
                 "pre": pre,
                 "transfer_points": max(1, int(transfer_points)),
             }
+            self._fast_active_source = ch
 
     def get_waveform_fast(
         self,
@@ -571,13 +574,13 @@ class MSO4Client:
         with self._lock:
             inst = self._require_instrument()
             try:
-                inst.write(f"DATA:SOURCE {ch}")
-                inst.write("DATA:MODE VECTOR")
-                # Re-assert resample because DATA settings are global and another
-                # transfer mode may have changed them.
-                inst.write(f"DATA:START {int(cached['data_start'])}")
-                inst.write(f"DATA:STOP {int(cached['data_stop'])}")
-                inst.write(f"DATA:RESAMPLE {resample}")
+                # After prepare_fast_waveform(), transfer geometry is stable.
+                # On a single-channel RUN this reduces the hot path to CURVE?
+                # only. With multiple channels, only DATA:SOURCE is added.
+                if self._fast_active_source != ch:
+                    inst.write(f"DATA:SOURCE {ch}")
+                    self._fast_active_source = ch
+
                 samples = inst.query_binary_values(
                     "CURVE?",
                     datatype="b",
@@ -585,8 +588,11 @@ class MSO4Client:
                     container=np.array,
                 )
             except Exception:
+                # A settings change or another transfer mode may have invalidated
+                # the DATA configuration. Rebuild once, then return to hot path.
                 self._recover_session(inst)
                 self._fast_transfer_cache.pop(ch, None)
+                self._fast_active_source = None
                 self.prepare_fast_waveform(ch, 1, desired_points)
                 cached = self._fast_transfer_cache[ch]
                 pre = cached["pre"]
@@ -595,11 +601,6 @@ class MSO4Client:
                 resample = int(cached["resample"])
 
                 inst = self._require_instrument()
-                inst.write(f"DATA:SOURCE {ch}")
-                inst.write("DATA:MODE VECTOR")
-                inst.write(f"DATA:START {int(cached['data_start'])}")
-                inst.write(f"DATA:STOP {int(cached['data_stop'])}")
-                inst.write(f"DATA:RESAMPLE {resample}")
                 samples = inst.query_binary_values(
                     "CURVE?",
                     datatype="b",
@@ -647,6 +648,9 @@ class MSO4Client:
         start: int = 1,
         stop: int = 10000,
     ) -> Waveform:
+        # Exact transfer changes DATA:WIDTH/RESAMPLE, so continuous RUN must
+        # rebuild its fast cache afterwards.
+        self.invalidate_waveform_cache()
         ch = self._validate_channel(channel)
         start = max(1, int(start))
         stop = max(start, int(stop))
