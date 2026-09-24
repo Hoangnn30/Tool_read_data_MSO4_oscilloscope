@@ -57,6 +57,7 @@ class MSO4Client:
         self._last_transfer_info: dict[str, dict[str, object]] = {}
         self._fast_transfer_cache: dict[str, dict[str, object]] = {}
         self._fast_active_source: str | None = None
+        self._record_length_cache: int | None = None
 
     @property
     def connected(self) -> bool:
@@ -153,6 +154,7 @@ class MSO4Client:
 
     def close(self) -> None:
         self.invalidate_waveform_cache()
+        self._record_length_cache = None
         inst, self._instrument = self._instrument, None
         if inst is not None:
             try:
@@ -264,6 +266,7 @@ class MSO4Client:
         if value <= 0:
             raise ValueError("Horizontal scale must be > 0.")
         self.write(f"HORIZONTAL:MODE:SCALE {value:.12g}")
+        self._record_length_cache = None
         self.invalidate_waveform_cache()
 
     def set_horizontal_position(self, percent: float) -> None:
@@ -289,7 +292,8 @@ class MSO4Client:
             except Exception:
                 pass
 
-        actual = self.get_record_length()
+        self._record_length_cache = None
+        actual = self.get_record_length(force=True)
         self.invalidate_waveform_cache()
         return actual or value
 
@@ -410,7 +414,17 @@ class MSO4Client:
 
         self.run_acquisition()
 
-    def get_record_length(self) -> int | None:
+        # Cache once for subsequent fast waveform setup. Avoid repeating this
+        # LAN round-trip for every channel before its first frame.
+        try:
+            self.get_record_length(force=True)
+        except Exception:
+            pass
+
+    def get_record_length(self, force: bool = False) -> int | None:
+        if not force and self._record_length_cache:
+            return self._record_length_cache
+
         for command in (
             "HORIZONTAL:MODE:RECORDLENGTH?",
             "HORIZONTAL:RECORDLENGTH?",
@@ -418,10 +432,11 @@ class MSO4Client:
             try:
                 value = self.query_int(command)
                 if value > 0:
+                    self._record_length_cache = value
                     return value
             except Exception:
                 pass
-        return None
+        return self._record_length_cache
 
     def get_scope_settings(self) -> dict[str, object]:
         """Read a compact set of front-panel settings.
@@ -528,14 +543,10 @@ class MSO4Client:
             inst.write("DATA:ENCDG RIBINARY")
             inst.write("DATA:WIDTH 1")
 
-            # Query the preamble only after DATA:RESAMPLE is set because the
-            # outgoing waveform timing metadata corresponds to the transfer.
-            pre = self._read_preamble()
-
-            try:
-                transfer_points = self.query_int("WFMOUTPRE:NR_PT?")
-            except Exception:
-                transfer_points = int(np.ceil(record_length / resample))
+            # Query timing/scaling in one SCPI round-trip. Falling back to
+            # individual queries keeps compatibility with older firmware.
+            pre = self._read_preamble_fast()
+            transfer_points = int(np.ceil(record_length / resample))
 
             self._fast_transfer_cache[ch] = {
                 "desired_points": desired_points,
@@ -798,6 +809,32 @@ class MSO4Client:
             raise MSO4Error("CURVE? returned no ASCII samples.")
 
         return samples, pre, transfer_points
+
+    def _read_preamble_fast(self) -> WaveformPreamble:
+        """Read the six display-critical preamble values in one LAN query."""
+        command = (
+            "WFMOUTPRE:XINCR?;XZERO?;PT_OFF?;"
+            "YMULT?;YZERO?;YOFF?"
+        )
+        try:
+            raw = self.query(command)
+            parts = [part.strip() for part in raw.split(";") if part.strip()]
+            if len(parts) != 6:
+                raise ValueError(
+                    f"Expected 6 preamble values, received {len(parts)}"
+                )
+
+            values = [self._parse_number(part) for part in parts]
+            return WaveformPreamble(
+                xincr=values[0],
+                xzero=values[1],
+                pt_off=values[2],
+                ymult=values[3],
+                yzero=values[4],
+                yoff=values[5],
+            )
+        except Exception:
+            return self._read_preamble()
 
     def _read_preamble(self) -> WaveformPreamble:
         return WaveformPreamble(
