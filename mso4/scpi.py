@@ -55,6 +55,7 @@ class MSO4Client:
         self._instrument: Optional[MessageBasedResource] = None
         self._lock = threading.RLock()
         self._last_transfer_info: dict[str, dict[str, object]] = {}
+        self._fast_transfer_cache: dict[str, dict[str, object]] = {}
 
     @property
     def connected(self) -> bool:
@@ -100,6 +101,7 @@ class MSO4Client:
             ) from exc
 
     def close(self) -> None:
+        self._fast_transfer_cache.clear()
         inst, self._instrument = self._instrument, None
         if inst is not None:
             try:
@@ -168,6 +170,9 @@ class MSO4Client:
     def query_enum(self, command: str) -> str:
         return self._parse_enum(self.query(command))
 
+    def invalidate_waveform_cache(self) -> None:
+        self._fast_transfer_cache.clear()
+
     # ------------------------------------------------------------------
     # Front-panel style controls
     # ------------------------------------------------------------------
@@ -182,14 +187,17 @@ class MSO4Client:
         if value <= 0:
             raise ValueError("Vertical scale must be > 0.")
         self.write(f"{ch}:SCALE {value:.12g}")
+        self.invalidate_waveform_cache()
 
     def set_channel_position(self, channel: str, divisions: float) -> None:
         ch = self._validate_channel(channel)
         self.write(f"{ch}:POSITION {float(divisions):.12g}")
+        self.invalidate_waveform_cache()
 
     def set_channel_offset(self, channel: str, volts: float) -> None:
         ch = self._validate_channel(channel)
         self.write(f"{ch}:OFFSET {float(volts):.12g}")
+        self.invalidate_waveform_cache()
 
     def set_channel_coupling(self, channel: str, coupling: str) -> None:
         ch = self._validate_channel(channel)
@@ -197,16 +205,19 @@ class MSO4Client:
         if value not in self.COUPLINGS:
             raise ValueError(f"Unsupported coupling: {coupling}")
         self.write(f"{ch}:COUPLING {value}")
+        self.invalidate_waveform_cache()
 
     def set_horizontal_scale(self, seconds_per_div: float) -> None:
         value = float(seconds_per_div)
         if value <= 0:
             raise ValueError("Horizontal scale must be > 0.")
         self.write(f"HORIZONTAL:MODE:SCALE {value:.12g}")
+        self.invalidate_waveform_cache()
 
     def set_horizontal_position(self, percent: float) -> None:
         value = max(0.0, min(100.0, float(percent)))
         self.write(f"HORIZONTAL:POSITION {value:.12g}")
+        self.invalidate_waveform_cache()
 
     def set_record_length(self, points: int, preserve_scale: bool = True) -> int:
         value = max(1000, int(points))
@@ -227,6 +238,7 @@ class MSO4Client:
                 pass
 
         actual = self.get_record_length()
+        self.invalidate_waveform_cache()
         return actual or value
 
     def set_trigger_source(self, channel: str) -> None:
@@ -309,9 +321,11 @@ class MSO4Client:
 
     def autoset(self) -> None:
         self.write("AUTOSET EXECUTE")
+        self.invalidate_waveform_cache()
 
     def factory_default(self) -> None:
         self.write("FACTORY")
+        self.invalidate_waveform_cache()
 
     def prepare_acquisition(
         self,
@@ -333,6 +347,14 @@ class MSO4Client:
                 self.set_channel_state(ch, ch in clean)
             except Exception:
                 pass
+
+        # Configure binary transfer once. RUN frames will reuse this setup and
+        # cached waveform preambles instead of issuing many small LAN queries.
+        self.invalidate_waveform_cache()
+        with self._lock:
+            inst = self._require_instrument()
+            inst.write("DATA:ENCDG RIBINARY")
+            inst.write("DATA:WIDTH 1")
 
         self.run_acquisition()
 
@@ -420,6 +442,119 @@ class MSO4Client:
 
     def get_last_transfer_info(self, channel: str) -> dict[str, object]:
         return dict(self._last_transfer_info.get(channel.upper(), {}))
+
+    def prepare_fast_waveform(
+        self,
+        channel: str,
+        start: int = 1,
+        stop: int = 5000,
+    ) -> None:
+        """Cache waveform scaling for fast continuous display."""
+        ch = self._validate_channel(channel)
+        start = max(1, int(start))
+        stop = max(start, int(stop))
+
+        with self._lock:
+            inst = self._require_instrument()
+            inst.write(f"DATA:SOURCE {ch}")
+            inst.write(f"DATA:START {start}")
+            inst.write(f"DATA:STOP {stop}")
+            inst.write("DATA:ENCDG RIBINARY")
+            inst.write("DATA:WIDTH 1")
+
+            pre = self._read_preamble()
+            try:
+                transfer_points = self.query_int("WFMOUTPRE:NR_PT?")
+            except Exception:
+                transfer_points = stop - start + 1
+
+            self._fast_transfer_cache[ch] = {
+                "start": start,
+                "stop": stop,
+                "pre": pre,
+                "transfer_points": max(1, int(transfer_points)),
+            }
+
+    def get_waveform_fast(
+        self,
+        channel: str,
+        start: int = 1,
+        stop: int = 5000,
+    ) -> Waveform:
+        """Fast display path: one source select + one binary CURVE? per frame.
+
+        Scaling metadata is cached. Use get_waveform() for exact/full GET DATA.
+        """
+        ch = self._validate_channel(channel)
+        start = max(1, int(start))
+        stop = max(start, int(stop))
+
+        cached = self._fast_transfer_cache.get(ch)
+        if (
+            cached is None
+            or int(cached.get("start", -1)) != start
+            or int(cached.get("stop", -1)) != stop
+        ):
+            self.prepare_fast_waveform(ch, start, stop)
+            cached = self._fast_transfer_cache[ch]
+
+        pre = cached["pre"]
+        transfer_points = int(cached["transfer_points"])
+
+        with self._lock:
+            inst = self._require_instrument()
+            try:
+                inst.write(f"DATA:SOURCE {ch}")
+                samples = inst.query_binary_values(
+                    "CURVE?",
+                    datatype="b",
+                    is_big_endian=True,
+                    container=np.array,
+                )
+            except Exception:
+                # Rebuild cache once after a transport/settings mismatch.
+                self._recover_session(inst)
+                self._fast_transfer_cache.pop(ch, None)
+                self.prepare_fast_waveform(ch, start, stop)
+                cached = self._fast_transfer_cache[ch]
+                pre = cached["pre"]
+                transfer_points = int(cached["transfer_points"])
+                inst = self._require_instrument()
+                inst.write(f"DATA:SOURCE {ch}")
+                samples = inst.query_binary_values(
+                    "CURVE?",
+                    datatype="b",
+                    is_big_endian=True,
+                    container=np.array,
+                )
+
+        raw = np.asarray(samples, dtype=np.float64)
+        if raw.size == 0:
+            raise MSO4Error(f"{ch} returned zero waveform points.")
+
+        n = raw.size
+        x = pre.xzero + (
+            np.arange(n, dtype=np.float64) - pre.pt_off
+        ) * pre.xincr
+        y = (raw - pre.yoff) * pre.ymult + pre.yzero
+
+        self._last_transfer_info[ch] = {
+            "mode": "FAST-BINARY",
+            "points": int(n),
+            "reported_points": int(transfer_points),
+            "record_length": None,
+            "xincr": float(pre.xincr),
+            "xzero": float(pre.xzero),
+            "pt_off": float(pre.pt_off),
+            "ymult": float(pre.ymult),
+            "yzero": float(pre.yzero),
+            "yoff": float(pre.yoff),
+            "time_start": float(x[0]) if n else None,
+            "time_stop": float(x[-1]) if n else None,
+            "voltage_min": float(np.min(y)) if n else None,
+            "voltage_max": float(np.max(y)) if n else None,
+        }
+        return Waveform(channel=ch, time_s=x, volts=y)
 
     def get_waveform(
         self,
