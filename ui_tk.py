@@ -1613,8 +1613,8 @@ class MSO4ScopeApp:
         self._need_autoscale = True
 
         self.run_btn.configure(text="STOP", style="Stop.TButton")
-        self.status_var.set("Starting acquisition...")
-        self.transfer_var.set("Waiting for waveform...")
+        self.status_var.set(f"Starting {self._selected_channel} first...")
+        self.transfer_var.set("Waiting for first waveform...")
 
         def worker() -> None:
             try:
@@ -1622,22 +1622,19 @@ class MSO4ScopeApp:
                     channels,
                     fast_record_length=None,
                 )
-                record_length = self.client.get_record_length()
-                self.command_queue.put(("prepared", record_length))
+                self.command_queue.put(("prepared", None))
             except Exception as exc:
                 self.command_queue.put(("acq_error", f"Cannot start acquisition: {exc}"))
                 return
 
-            # Prime each enabled channel once so WFMOUTPRE/RESAMPLE queries
-            # happen only at startup or after a scale change.
-            try:
-                for ch in channels:
-                    if self.stop_event.is_set():
-                        return
-                    self.client.prepare_fast_waveform(ch, 1, points)
-            except Exception:
-                # get_waveform_fast() can still rebuild an individual cache.
-                pass
+            # Put the currently selected channel first so the user sees a
+            # waveform as soon as possible. Other channels are initialized lazily
+            # on their first round-robin turn.
+            if self._selected_channel in channels:
+                channels = [
+                    self._selected_channel,
+                    *[ch for ch in channels if ch != self._selected_channel],
+                ]
 
             last_report = time.monotonic()
             updates = 0
