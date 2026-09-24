@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
-        self.ip_edit = QLineEdit("192.168.1.120")
+        self.ip_edit = QLineEdit("192.168.1.133")
         self.ip_edit.setPlaceholderText("MSO44 IP")
         self.ip_edit.setFixedWidth(155)
 
@@ -441,7 +441,7 @@ class MainWindow(QMainWindow):
         self.connect_btn.setEnabled(False)
         self.status_connection.setText(f"Connecting to {host}...")
         try:
-            client = MSO4Client(host, self.port_edit.value(), timeout=3.0)
+            client = MSO4Client(host, timeout=5.0)
             idn = client.connect()
             self.client = client
             self.scpi_result.setText(idn)
