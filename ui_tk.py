@@ -320,11 +320,19 @@ class MSO4ScopeApp:
 
         tk.Label(
             frame,
+            textvariable=self.transfer_var,
+            bg="#0B0F14",
+            fg="#8FA3B8",
+            anchor="w",
+        ).pack(fill="x", padx=6, pady=(3, 0))
+
+        tk.Label(
+            frame,
             textvariable=self.cursor_var,
             bg="#0B0F14",
             fg="#93A0AD",
             anchor="w",
-        ).pack(fill="x", padx=0, pady=0)
+        ).pack(fill="x", padx=6, pady=(0, 3))
 
         return frame
 
@@ -452,13 +460,27 @@ class MSO4ScopeApp:
             last_report = time.monotonic()
             frames = 0
 
+            try:
+                self.client.prepare_acquisition(channels)
+                record_length = self.client.get_record_length()
+                self.ui_queue.put(("prepared", record_length))
+            except Exception as exc:
+                self.ui_queue.put(("acq_error", f"Cannot start acquisition: {exc}"))
+                return
+
             while not self.stop_event.is_set():
                 started = time.monotonic()
-                try:
-                    for ch in channels:
-                        if self.stop_event.is_set():
-                            return
+                successful_channels = 0
+                errors: list[str] = []
+
+                for ch in channels:
+                    if self.stop_event.is_set():
+                        return
+
+                    try:
                         waveform = self.client.get_waveform(ch, 1, points)
+                        info = self.client.get_last_transfer_info(ch)
+                        successful_channels += 1
                         self.ui_queue.put(
                             (
                                 "waveform",
@@ -466,11 +488,23 @@ class MSO4ScopeApp:
                                 waveform.time_s,
                                 waveform.volts,
                                 waveform.measurements(),
+                                info,
                             )
                         )
-                except Exception as exc:
-                    if not self.stop_event.is_set():
-                        self.ui_queue.put(("acq_error", str(exc)))
+                    except Exception as exc:
+                        errors.append(f"{ch}: {exc}")
+                        self.ui_queue.put(("channel_error", ch, str(exc)))
+
+                # Do not kill good channels just because another selected channel
+                # has no usable waveform. Stop only when every selected channel fails.
+                if successful_channels == 0:
+                    self.ui_queue.put(
+                        (
+                            "acq_error",
+                            "No selected channel returned waveform data. "
+                            + " | ".join(errors),
+                        )
+                    )
                     return
 
                 frames += 1
@@ -577,7 +611,7 @@ class MSO4ScopeApp:
             c.create_text(
                 width / 2,
                 height / 2,
-                text="Connect MSO44 and press RUN",
+                text=("Connected - press RUN" if self.client and self.client.connected else "Connect to MSO44"),
                 fill="#586574",
                 font=("Arial", 14),
             )
@@ -665,15 +699,41 @@ class MSO4ScopeApp:
                     self.status_var.set("Connection failed")
                     messagebox.showerror("MSO4 connection failed", msg[1])
 
+                elif kind == "prepared":
+                    record_length = msg[1]
+                    if record_length:
+                        self.status_var.set(
+                            f"Acquisition running - record length {record_length} pts"
+                        )
+                    else:
+                        self.status_var.set("Acquisition running")
+
                 elif kind == "waveform":
-                    _, ch, x, y, measurements = msg
+                    _, ch, x, y, measurements, info = msg
                     self.waveforms[ch] = (x, y)
                     self.measurements[ch] = measurements
+                    self.channel_errors.pop(ch, None)
                     self._update_measurements(ch, measurements)
+
+                    mode = info.get("mode", "?")
+                    npts = info.get("points", len(y))
+                    record = info.get("record_length")
+                    extra = f" / record {record}" if record else ""
+                    self.transfer_var.set(
+                        f"{ch}: {npts} pts via {mode}{extra}"
+                    )
+
+                    # Auto-range the first successfully received waveform so a
+                    # valid trace is always visible immediately after RUN.
                     if self.x_range is None or self.y_range is None:
                         self._autoscale()
                     else:
                         self._redraw_scope()
+
+                elif kind == "channel_error":
+                    _, ch, error = msg
+                    self.channel_errors[ch] = error
+                    self.transfer_var.set(f"{ch} read warning: {error}")
 
                 elif kind == "rate":
                     self.rate_var.set(f"Acq: {msg[1]:.1f} fps")
