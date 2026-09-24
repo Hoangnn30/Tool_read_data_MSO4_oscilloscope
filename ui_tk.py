@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 import math
 import queue
 import threading
@@ -93,6 +94,7 @@ class MSO4ScopeApp:
         self.client: Optional[MSO4Client] = None
         self.hsi_client: Optional[TekHSIWaveformClient] = None
         self.waveform_transport = "SCPI"
+        self.instrument_idn = ""
         self.acq_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self._acq_generation = 0
@@ -1307,6 +1309,7 @@ class MSO4ScopeApp:
 
         client = self.client
         self.client = None
+        self.instrument_idn = ""
         if client:
             try:
                 client.close()
@@ -2625,6 +2628,7 @@ class MSO4ScopeApp:
                     _, client, hsi, idn, settings = msg
                     self.client = client
                     self.hsi_client = hsi
+                    self.instrument_idn = str(idn)
                     self.connect_btn.configure(text="DISCONNECT", state="normal")
                     self.run_btn.configure(state="normal")
                     self.single_btn.configure(state="normal")
@@ -2748,6 +2752,25 @@ class MSO4ScopeApp:
                         f"GET DATA complete: {points} pts in {elapsed:.3f}s"
                     )
                     self._need_autoscale = True
+                    if resume and self.client and self.client.connected:
+                        self.root.after(80, self._start_acquisition)
+
+                elif kind == "csv_saved":
+                    _, filename, channels, points, resume = msg
+                    self.status_var.set(
+                        f"Saved exact CSV: {filename}"
+                    )
+                    self.transfer_var.set(
+                        f"CSV exact | {','.join(channels)} | "
+                        f"up to {points} pts/channel"
+                    )
+                    if resume and self.client and self.client.connected:
+                        self.root.after(80, self._start_acquisition)
+
+                elif kind == "csv_save_error":
+                    _, error, resume = msg
+                    self.status_var.set("CSV save failed")
+                    messagebox.showerror("Save CSV", error)
                     if resume and self.client and self.client.connected:
                         self.root.after(80, self._start_acquisition)
 
@@ -3042,44 +3065,339 @@ class MSO4ScopeApp:
     # ------------------------------------------------------------------
 
     def _save_csv(self) -> None:
-        active = [
+        """Capture and save an exact scope snapshot with verified metadata.
+
+        Realtime display data may be decimated for speed. SAVE CSV therefore
+        never writes self.waveforms directly. It performs a fresh exact
+        16-bit SCPI transfer after restoring the normal acquisition record.
+        """
+        if not self.client or not self.client.connected:
+            messagebox.showinfo("Save CSV", "Connect the oscilloscope first.")
+            return
+
+        channels = [
             ch
             for ch in CHANNEL_COLORS
-            if self.channel_vars[ch].get() and ch in self.waveforms
+            if bool(self.channel_vars[ch].get())
         ]
-        if not active:
-            messagebox.showinfo("Save CSV", "No waveform data to save.")
+        if not channels:
+            messagebox.showinfo(
+                "Save CSV",
+                "Select at least one channel to save.",
+            )
             return
 
         path = filedialog.asksaveasfilename(
-            title="Save waveform CSV",
+            title="Save exact waveform CSV",
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv")],
-            initialfile="mso44_waveform.csv",
+            initialfile=(
+                "mso44b_"
+                + datetime.now().strftime("%Y%m%d_%H%M%S")
+                + ".csv"
+            ),
         )
         if not path:
             return
 
-        max_len = max(len(self.waveforms[ch][0]) for ch in active)
+        try:
+            requested_points = max(500, int(self.points_var.get()))
+        except ValueError:
+            requested_points = 5000
 
-        with open(path, "w", newline="", encoding="utf-8") as fp:
-            writer = csv.writer(fp)
-            header = []
-            for ch in active:
-                header.extend([f"{ch}_time_s", f"{ch}_volts"])
-            writer.writerow(header)
+        save_full_record = bool(self.get_full_record_var.get())
+        was_running = bool(
+            self.acq_thread and self.acq_thread.is_alive()
+        )
 
-            for i in range(max_len):
-                row = []
-                for ch in active:
-                    x, y = self.waveforms[ch]
-                    if i < len(x):
-                        row.extend([x[i], y[i]])
-                    else:
-                        row.extend(["", ""])
-                writer.writerow(row)
+        # Invalidate the realtime reader immediately so no stale/decimated
+        # frames can be mistaken for the saved snapshot.
+        if was_running:
+            self._stop_acquisition(local_only=True)
 
-        self.status_var.set(f"Saved CSV: {Path(path).name}")
+        self.status_var.set("SAVE CSV: capturing exact waveform...")
+        self.transfer_var.set("Exact 16-bit snapshot for CSV...")
+
+        def worker() -> None:
+            try:
+                # Stop the scope and detach HSI while taking a deterministic
+                # exact snapshot through the SCPI waveform path.
+                try:
+                    self.client.stop_acquisition()
+                except Exception:
+                    pass
+
+                if self.hsi_client is not None:
+                    try:
+                        self.hsi_client.close()
+                    except Exception:
+                        pass
+
+                try:
+                    self.client.exit_realtime_mode()
+                except Exception:
+                    pass
+
+                settings = self.client.get_scope_settings()
+
+                points = requested_points
+                record_length = self.client.get_record_length(force=True)
+                if save_full_record and record_length and record_length > 0:
+                    points = int(record_length)
+
+                captured_at = datetime.now().astimezone().isoformat(
+                    timespec="milliseconds"
+                )
+
+                waveforms = {}
+                transfer_info = {}
+                measurements = {}
+
+                for ch in channels:
+                    waveform = self.client.get_waveform(
+                        ch,
+                        1,
+                        points,
+                    )
+                    waveforms[ch] = waveform
+                    transfer_info[ch] = (
+                        self.client.get_last_transfer_info(ch)
+                    )
+                    measurements[ch] = waveform.measurements()
+
+                idn = self.instrument_idn
+                if not idn:
+                    try:
+                        idn = self.client.query("*IDN?")
+                    except Exception:
+                        idn = ""
+
+                resource = (
+                    self.client.active_resource_name
+                    or self.client.resource_name
+                )
+                control_transport = (
+                    self.client.active_transport or "VISA/SCPI"
+                )
+
+                with open(
+                    path,
+                    "w",
+                    newline="",
+                    encoding="utf-8",
+                ) as fp:
+                    writer = csv.writer(fp)
+
+                    # General metadata.
+                    writer.writerow(["[GENERAL]"])
+                    writer.writerow(["field", "value", "unit"])
+                    writer.writerow(
+                        ["captured_at", captured_at, "ISO-8601"]
+                    )
+                    writer.writerow(
+                        ["instrument_idn", idn, ""]
+                    )
+                    writer.writerow(
+                        ["visa_resource", resource, ""]
+                    )
+                    writer.writerow(
+                        ["control_transport", control_transport, ""]
+                    )
+                    writer.writerow(
+                        ["waveform_capture", "SCPI exact binary", ""]
+                    )
+                    writer.writerow(
+                        ["binary_width", "16", "bit"]
+                    )
+                    writer.writerow(
+                        [
+                            "requested_full_record",
+                            int(save_full_record),
+                            "bool",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "record_length",
+                            record_length or "",
+                            "points",
+                        ]
+                    )
+
+                    hscale = settings.get("horizontal_scale")
+                    hpos = settings.get("horizontal_position")
+                    writer.writerow(
+                        [
+                            "time_div",
+                            hscale if hscale is not None else "",
+                            "s/div",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "horizontal_position",
+                            hpos if hpos is not None else "",
+                            "%",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "trigger_source",
+                            settings.get("trigger_source", ""),
+                            "",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "trigger_level",
+                            settings.get("trigger_level", ""),
+                            "V",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "trigger_slope",
+                            settings.get("trigger_slope", ""),
+                            "",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "trigger_mode",
+                            settings.get("trigger_mode", ""),
+                            "",
+                        ]
+                    )
+                    writer.writerow(
+                        [
+                            "acquire_mode",
+                            settings.get("acquire_mode", ""),
+                            "",
+                        ]
+                    )
+                    writer.writerow([])
+
+                    # Per-channel metadata and measurements.
+                    writer.writerow(["[CHANNEL_METADATA]"])
+                    writer.writerow(
+                        [
+                            "channel",
+                            "points",
+                            "v_div_V",
+                            "position_div",
+                            "offset_V",
+                            "coupling",
+                            "sample_interval_s",
+                            "time_start_s",
+                            "time_stop_s",
+                            "v_min_V",
+                            "v_max_V",
+                            "v_pp_V",
+                            "v_rms_V",
+                            "v_mean_V",
+                            "frequency_Hz",
+                        ]
+                    )
+
+                    channel_settings = settings.get("channels", {})
+                    if not isinstance(channel_settings, dict):
+                        channel_settings = {}
+
+                    for ch in channels:
+                        wf = waveforms[ch]
+                        info = transfer_info[ch]
+                        meas = measurements[ch]
+                        ch_settings = channel_settings.get(ch, {})
+                        if not isinstance(ch_settings, dict):
+                            ch_settings = {}
+
+                        dt = info.get("xincr")
+                        if dt is None and len(wf.time_s) > 1:
+                            dt = float(
+                                wf.time_s[1] - wf.time_s[0]
+                            )
+
+                        writer.writerow(
+                            [
+                                ch,
+                                wf.points,
+                                ch_settings.get("scale", ""),
+                                ch_settings.get("position", ""),
+                                ch_settings.get("offset", ""),
+                                ch_settings.get("coupling", ""),
+                                dt if dt is not None else "",
+                                (
+                                    float(wf.time_s[0])
+                                    if wf.points else ""
+                                ),
+                                (
+                                    float(wf.time_s[-1])
+                                    if wf.points else ""
+                                ),
+                                meas.get("min", ""),
+                                meas.get("max", ""),
+                                meas.get("pkpk", ""),
+                                meas.get("rms", ""),
+                                meas.get("mean", ""),
+                                meas.get("frequency", ""),
+                            ]
+                        )
+
+                    writer.writerow([])
+
+                    # Raw waveform values. One Time/Voltage pair per channel.
+                    writer.writerow(["[WAVEFORM_DATA]"])
+                    header = []
+                    for ch in channels:
+                        header.extend(
+                            [
+                                f"{ch}_time_s",
+                                f"{ch}_voltage_V",
+                            ]
+                        )
+                    writer.writerow(header)
+
+                    max_len = max(
+                        waveforms[ch].points for ch in channels
+                    )
+
+                    for i in range(max_len):
+                        row = []
+                        for ch in channels:
+                            wf = waveforms[ch]
+                            if i < wf.points:
+                                # repr(float) preserves enough precision for
+                                # round-trip numerical reconstruction.
+                                row.extend(
+                                    [
+                                        repr(float(wf.time_s[i])),
+                                        repr(float(wf.volts[i])),
+                                    ]
+                                )
+                            else:
+                                row.extend(["", ""])
+                        writer.writerow(row)
+
+                self.command_queue.put(
+                    (
+                        "csv_saved",
+                        Path(path).name,
+                        channels,
+                        points,
+                        was_running,
+                    )
+                )
+
+            except Exception as exc:
+                self.command_queue.put(
+                    (
+                        "csv_save_error",
+                        str(exc),
+                        was_running,
+                    )
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _save_screenshot(self) -> None:
         path = filedialog.asksaveasfilename(
