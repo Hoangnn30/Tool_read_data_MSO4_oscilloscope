@@ -30,6 +30,10 @@ class MSO4Client:
     """Tektronix 4 Series MSO client over VISA TCPIP/LAN (VXI-11/LXI)."""
 
     CHANNELS = {"CH1", "CH2", "CH3", "CH4"}
+    COUPLINGS = {"DC", "AC"}
+    TRIGGER_SLOPES = {"RISE", "FALL", "EITHER"}
+    TRIGGER_MODES = {"AUTO", "NORMAL"}
+    ACQUIRE_MODES = {"SAMPLE", "PEAKDETECT", "HIRES", "AVERAGE", "ENVELOPE"}
 
     def __init__(
         self,
@@ -127,7 +131,6 @@ class MSO4Client:
 
     @staticmethod
     def _parse_number(raw: str) -> float:
-        """Accept both plain SCPI numbers and verbose Tektronix responses."""
         text = raw.strip().strip('"')
         try:
             return float(text)
@@ -139,6 +142,15 @@ class MSO4Client:
             if not matches:
                 raise
             return float(matches[-1])
+
+    @staticmethod
+    def _parse_enum(raw: str) -> str:
+        text = raw.strip().strip('"').rstrip(";")
+        if " " in text:
+            text = text.split()[-1]
+        elif ":" in text:
+            text = text.split(":")[-1]
+        return text.strip().upper()
 
     def query_float(self, command: str) -> float:
         raw = self.query(command)
@@ -152,43 +164,237 @@ class MSO4Client:
     def query_int(self, command: str) -> int:
         return int(round(self.query_float(command)))
 
-    def prepare_acquisition(self, channels: list[str]) -> None:
-        """Make selected physical channels visible and start continuous acquisition.
+    def query_enum(self, command: str) -> str:
+        return self._parse_enum(self.query(command))
 
-        This mirrors the user's intent when pressing RUN in the desktop client.
-        """
-        clean = [self._validate_channel(ch) for ch in channels]
-        with self._lock:
-            inst = self._require_instrument()
+    # ------------------------------------------------------------------
+    # Front-panel style controls
+    # ------------------------------------------------------------------
 
-            for ch in clean:
-                try:
-                    inst.write(f"DISPLAY:WAVEVIEW1:{ch}:STATE ON")
-                except Exception:
-                    # Older firmware also supports the global state command.
-                    try:
-                        inst.write(f"DISPLAY:GLOBAL:{ch}:STATE ON")
-                    except Exception:
-                        pass
+    def set_channel_state(self, channel: str, enabled: bool) -> None:
+        ch = self._validate_channel(channel)
+        self.write(f"DISPLAY:WAVEVIEW1:{ch}:STATE {'ON' if enabled else 'OFF'}")
 
-            # Force normal continuous acquisition so CURVE? has fresh records.
+    def set_channel_scale(self, channel: str, volts_per_div: float) -> None:
+        ch = self._validate_channel(channel)
+        value = float(volts_per_div)
+        if value <= 0:
+            raise ValueError("Vertical scale must be > 0.")
+        self.write(f"{ch}:SCALE {value:.12g}")
+
+    def set_channel_position(self, channel: str, divisions: float) -> None:
+        ch = self._validate_channel(channel)
+        self.write(f"{ch}:POSITION {float(divisions):.12g}")
+
+    def set_channel_offset(self, channel: str, volts: float) -> None:
+        ch = self._validate_channel(channel)
+        self.write(f"{ch}:OFFSET {float(volts):.12g}")
+
+    def set_channel_coupling(self, channel: str, coupling: str) -> None:
+        ch = self._validate_channel(channel)
+        value = coupling.upper().strip()
+        if value not in self.COUPLINGS:
+            raise ValueError(f"Unsupported coupling: {coupling}")
+        self.write(f"{ch}:COUPLING {value}")
+
+    def set_horizontal_scale(self, seconds_per_div: float) -> None:
+        value = float(seconds_per_div)
+        if value <= 0:
+            raise ValueError("Horizontal scale must be > 0.")
+        self.write(f"HORIZONTAL:MODE:SCALE {value:.12g}")
+
+    def set_horizontal_position(self, percent: float) -> None:
+        value = max(0.0, min(100.0, float(percent)))
+        self.write(f"HORIZONTAL:POSITION {value:.12g}")
+
+    def set_record_length(self, points: int, preserve_scale: bool = True) -> int:
+        value = max(1000, int(points))
+        scale = None
+        if preserve_scale:
             try:
-                inst.write("ACQUIRE:STOPAFTER RUNSTOP")
+                scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+            except Exception:
+                scale = None
+
+        self.write("HORIZONTAL:MODE MANUAL")
+        self.write(f"HORIZONTAL:MODE:RECORDLENGTH {value}")
+
+        if scale is not None:
+            try:
+                self.write(f"HORIZONTAL:MODE:SCALE {scale:.12g}")
+            except Exception:
+                pass
+
+        actual = self.get_record_length()
+        return actual or value
+
+    def set_trigger_source(self, channel: str) -> None:
+        ch = self._validate_channel(channel)
+        self.write(f"TRIGGER:A:EDGE:SOURCE {ch}")
+
+    def set_trigger_level(self, channel: str, volts: float) -> None:
+        ch = self._validate_channel(channel)
+        self.write(f"TRIGGER:A:LEVEL:{ch} {float(volts):.12g}")
+
+    def set_trigger_slope(self, slope: str) -> None:
+        value = slope.upper().strip()
+        if value not in self.TRIGGER_SLOPES:
+            raise ValueError(f"Unsupported trigger slope: {slope}")
+        self.write(f"TRIGGER:A:EDGE:SLOPE {value}")
+
+    def set_trigger_mode(self, mode: str) -> None:
+        value = mode.upper().strip()
+        if value == "NORM":
+            value = "NORMAL"
+        if value not in self.TRIGGER_MODES:
+            raise ValueError(f"Unsupported trigger mode: {mode}")
+        self.write(f"TRIGGER:A:MODE {value}")
+
+    def trigger_level_50_percent(self) -> None:
+        self.write("TRIGGER:A SETLEVEL")
+
+    def force_trigger(self) -> None:
+        self.write("TRIGGER FORCE")
+
+    def set_acquire_mode(self, mode: str) -> None:
+        value = mode.upper().replace(" ", "").strip()
+        aliases = {
+            "PEAK": "PEAKDETECT",
+            "PEAKDETECT": "PEAKDETECT",
+            "HIRES": "HIRES",
+            "AVERAGE": "AVERAGE",
+            "ENVELOPE": "ENVELOPE",
+            "SAMPLE": "SAMPLE",
+        }
+        value = aliases.get(value, value)
+        if value not in self.ACQUIRE_MODES:
+            raise ValueError(f"Unsupported acquisition mode: {mode}")
+        self.write(f"ACQUIRE:MODE {value}")
+
+    def set_average_count(self, count: int) -> None:
+        self.write(f"ACQUIRE:NUMAVG {max(2, min(10240, int(count)))}")
+
+    def run_acquisition(self) -> None:
+        self.write("ACQUIRE:STOPAFTER RUNSTOP")
+        self.write("ACQUIRE:STATE RUN")
+
+    def stop_acquisition(self) -> None:
+        self.write("ACQUIRE:STATE STOP")
+
+    def single_acquisition(self) -> None:
+        self.write("ACQUIRE:STOPAFTER SEQUENCE")
+        self.write("ACQUIRE:STATE RUN")
+
+    def autoset(self) -> None:
+        self.write("AUTOSET EXECUTE")
+
+    def factory_default(self) -> None:
+        self.write("FACTORY")
+
+    def prepare_acquisition(
+        self,
+        channels: list[str],
+        fast_record_length: int | None = None,
+    ) -> None:
+        clean = [self._validate_channel(ch) for ch in channels]
+
+        if fast_record_length is not None:
+            try:
+                self.set_record_length(fast_record_length, preserve_scale=True)
+            except Exception:
+                # Fast mode is an optimization; waveform acquisition can still work
+                # even if firmware rejects the record-length adjustment.
+                pass
+
+        for ch in self.CHANNELS:
+            try:
+                self.set_channel_state(ch, ch in clean)
+            except Exception:
+                pass
+
+        self.run_acquisition()
+
+    def get_record_length(self) -> int | None:
+        for command in (
+            "HORIZONTAL:MODE:RECORDLENGTH?",
+            "HORIZONTAL:RECORDLENGTH?",
+        ):
+            try:
+                value = self.query_int(command)
+                if value > 0:
+                    return value
+            except Exception:
+                pass
+        return None
+
+    def get_scope_settings(self) -> dict[str, object]:
+        """Read a compact set of front-panel settings.
+
+        Intended for connect/refresh, not every waveform frame.
+        """
+        result: dict[str, object] = {}
+
+        def qfloat(key: str, command: str) -> None:
+            try:
+                result[key] = self.query_float(command)
+            except Exception:
+                pass
+
+        def qenum(key: str, command: str) -> None:
+            try:
+                result[key] = self.query_enum(command)
+            except Exception:
+                pass
+
+        qfloat("horizontal_scale", "HORIZONTAL:MODE:SCALE?")
+        qfloat("horizontal_position", "HORIZONTAL:POSITION?")
+        qenum("trigger_source", "TRIGGER:A:EDGE:SOURCE?")
+        qenum("trigger_slope", "TRIGGER:A:EDGE:SLOPE?")
+        qenum("trigger_mode", "TRIGGER:A:MODE?")
+        qenum("acquire_mode", "ACQUIRE:MODE?")
+
+        record = self.get_record_length()
+        if record is not None:
+            result["record_length"] = record
+
+        trigger_source = str(result.get("trigger_source", "CH1"))
+        if trigger_source not in self.CHANNELS:
+            trigger_source = "CH1"
+        qfloat("trigger_level", f"TRIGGER:A:LEVEL:{trigger_source}?")
+
+        channels: dict[str, dict[str, object]] = {}
+        for ch in sorted(self.CHANNELS):
+            values: dict[str, object] = {}
+            try:
+                values["enabled"] = bool(
+                    self.query_int(f"DISPLAY:WAVEVIEW1:{ch}:STATE?")
+                )
             except Exception:
                 pass
             try:
-                inst.write("ACQUIRE:STATE RUN")
-            except Exception as exc:
-                raise MSO4Error(
-                    f"Could not start MSO4 acquisition: {exc}"
-                ) from exc
+                values["scale"] = self.query_float(f"{ch}:SCALE?")
+            except Exception:
+                pass
+            try:
+                values["position"] = self.query_float(f"{ch}:POSITION?")
+            except Exception:
+                pass
+            try:
+                values["offset"] = self.query_float(f"{ch}:OFFSET?")
+            except Exception:
+                pass
+            try:
+                values["coupling"] = self.query_enum(f"{ch}:COUPLING?")
+            except Exception:
+                pass
+            channels[ch] = values
 
-    def get_record_length(self) -> int | None:
-        try:
-            value = self.query_int("HORIZONTAL:RECORDLENGTH?")
-            return value if value > 0 else None
-        except Exception:
-            return None
+        result["channels"] = channels
+        return result
+
+    # ------------------------------------------------------------------
+    # Waveform transfer
+    # ------------------------------------------------------------------
 
     def get_last_transfer_info(self, channel: str) -> dict[str, object]:
         return dict(self._last_transfer_info.get(channel.upper(), {}))
@@ -206,14 +412,12 @@ class MSO4Client:
         with self._lock:
             inst = self._require_instrument()
 
-            # Never request beyond the physical acquisition record.
             record_length = self.get_record_length()
             if record_length is not None:
                 if start > record_length:
                     start = 1
                 stop = min(stop, record_length)
 
-            # First try the fast path: signed 8-bit binary.
             try:
                 samples, pre, transfer_points = self._read_curve_binary(
                     inst, ch, start, stop
@@ -221,9 +425,6 @@ class MSO4Client:
                 mode = "BINARY"
             except Exception as binary_error:
                 self._recover_session(inst)
-
-                # ASCII is slower but highly tolerant and is an important
-                # compatibility fallback for firmware/backend differences.
                 try:
                     samples, pre, transfer_points = self._read_curve_ascii(
                         inst, ch, start, stop
