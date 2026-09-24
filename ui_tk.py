@@ -97,6 +97,8 @@ class MSO4ScopeApp:
         self._need_autoscale = True
         self._closing = False
         self._last_draw = 0.0
+        self._wheel_after_id = None
+        self._selected_channel = "CH1"
 
         self.ip_var = tk.StringVar(value="192.168.1.133")
         self.status_var = tk.StringVar(value="Disconnected")
@@ -281,6 +283,15 @@ class MSO4ScopeApp:
         )
         self.single_btn.pack(side="left", padx=3)
 
+        self.get_data_btn = ttk.Button(
+            controls,
+            text="GET DATA",
+            command=self._get_data_once,
+            style="Dark.TButton",
+            state="disabled",
+        )
+        self.get_data_btn.pack(side="left", padx=3)
+
         self.autoset_btn = ttk.Button(
             controls,
             text="AUTOSET",
@@ -314,6 +325,18 @@ class MSO4ScopeApp:
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        canvas.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
+        canvas.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
+        canvas.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
+        canvas.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
+        canvas.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
+        canvas.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<MouseWheel>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<Button-4>", lambda e: self._scroll_panel(canvas, e))
+        inner.bind("<Button-5>", lambda e: self._scroll_panel(canvas, e))
 
         self._section_label(inner, "CHANNELS")
 
@@ -417,9 +440,11 @@ class MSO4ScopeApp:
             highlightthickness=1,
         )
         card.pack(fill="x", padx=10, pady=4)
+        card.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
 
         top = tk.Frame(card, bg="#161E27")
         top.pack(fill="x", padx=7, pady=(6, 3))
+        top.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
 
         cb = tk.Checkbutton(
             top,
@@ -444,6 +469,7 @@ class MSO4ScopeApp:
 
         grid = tk.Frame(card, bg="#161E27")
         grid.pack(fill="x", padx=7, pady=(2, 7))
+        grid.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
 
         tk.Label(grid, text="V/div", bg="#161E27", fg="#B9C0C8").grid(row=0, column=0, sticky="w")
         scale = ttk.Combobox(
@@ -528,6 +554,9 @@ class MSO4ScopeApp:
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda _e: self._redraw_scope())
         self.canvas.bind("<Motion>", self._on_mouse_move)
+        self.canvas.bind("<MouseWheel>", self._on_scope_wheel)
+        self.canvas.bind("<Button-4>", self._on_scope_wheel)
+        self.canvas.bind("<Button-5>", self._on_scope_wheel)
 
         tk.Label(
             frame,
@@ -781,6 +810,7 @@ class MSO4ScopeApp:
         self.connect_btn.configure(text="CONNECT", state="normal")
         self.run_btn.configure(text="RUN", state="disabled")
         self.single_btn.configure(state="disabled")
+        self.get_data_btn.configure(state="disabled")
         self.autoset_btn.configure(state="disabled")
         self.default_btn.configure(state="disabled")
         self.scpi_btn.configure(state="disabled")
@@ -960,13 +990,48 @@ class MSO4ScopeApp:
         def worker() -> None:
             try:
                 self.client.single_acquisition()
-                time.sleep(0.08)
+                self.client.wait_for_acquisition_complete(timeout=3.0)
                 self._acquire_one_frame(channels, points)
                 self.command_queue.put(("single_done",))
             except Exception as exc:
                 self.command_queue.put(("acq_error", f"Single: {exc}"))
 
         self.status_var.set("Single acquisition...")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _get_data_once(self) -> None:
+        if not self.client or not self.client.connected:
+            return
+
+        channels = [ch for ch, var in self.channel_vars.items() if var.get()]
+        if not channels:
+            messagebox.showinfo("GET DATA", "Enable at least one channel.")
+            return
+
+        try:
+            points = max(500, int(self.points_var.get()))
+        except ValueError:
+            points = 5000
+
+        was_running = bool(self.acq_thread and self.acq_thread.is_alive())
+        if was_running:
+            self._stop_acquisition(local_only=True)
+
+        self.status_var.set("GET DATA: reading current waveform...")
+        self.transfer_var.set("Reading waveform snapshot...")
+
+        def worker() -> None:
+            try:
+                successful = self._acquire_one_frame(channels, points)
+                if successful == 0:
+                    errors = " | ".join(
+                        f"{ch}: {msg}" for ch, msg in self.channel_errors.items()
+                    )
+                    raise RuntimeError(errors or "No waveform data returned.")
+                self.command_queue.put(("get_data_done", was_running))
+            except Exception as exc:
+                self.command_queue.put(("command_error", "GET DATA", str(exc)))
+
         threading.Thread(target=worker, daemon=True).start()
 
     def _refresh_settings(self) -> None:
@@ -1377,6 +1442,7 @@ class MSO4ScopeApp:
                     self.connect_btn.configure(text="DISCONNECT", state="normal")
                     self.run_btn.configure(state="normal")
                     self.single_btn.configure(state="normal")
+                    self.get_data_btn.configure(state="normal")
                     self.autoset_btn.configure(state="normal")
                     self.default_btn.configure(state="normal")
                     self.scpi_btn.configure(state="normal")
@@ -1415,6 +1481,13 @@ class MSO4ScopeApp:
                 elif kind == "single_done":
                     self.status_var.set("Single acquisition complete")
                     self.run_btn.configure(text="RUN")
+
+                elif kind == "get_data_done":
+                    _, resume = msg
+                    self.status_var.set("GET DATA complete")
+                    self._need_autoscale = True
+                    if resume and self.client and self.client.connected:
+                        self.root.after(80, self._start_acquisition)
 
                 elif kind == "acq_error":
                     self._stop_acquisition(local_only=True)
@@ -1509,6 +1582,102 @@ class MSO4ScopeApp:
                     coupling = str(values["coupling"]).upper()
                     if coupling in {"DC", "AC"}:
                         self.channel_coupling_vars[ch].set(coupling)
+
+    def _select_channel(self, channel: str) -> None:
+        if channel in CHANNEL_COLORS:
+            self._selected_channel = channel
+            self.status_var.set(f"Selected {channel}")
+
+    @staticmethod
+    def _wheel_direction(event) -> int:
+        if getattr(event, "num", None) == 4:
+            return 1
+        if getattr(event, "num", None) == 5:
+            return -1
+        delta = getattr(event, "delta", 0)
+        return 1 if delta > 0 else (-1 if delta < 0 else 0)
+
+    def _scroll_panel(self, canvas: tk.Canvas, event) -> str:
+        direction = self._wheel_direction(event)
+        if direction:
+            canvas.yview_scroll(-direction, "units")
+        return "break"
+
+    def _on_scope_wheel(self, event) -> str:
+        if not self.client or not self.client.connected:
+            return "break"
+
+        direction = self._wheel_direction(event)
+        if direction == 0:
+            return "break"
+
+        shift = bool(getattr(event, "state", 0) & 0x0001)
+
+        if shift:
+            ch = self._selected_channel
+            try:
+                current = self._parse_vdiv(self.channel_scale_vars[ch].get())
+            except Exception:
+                current = 1.0
+
+            idx = min(
+                range(len(VERTICAL_SCALES)),
+                key=lambda i: abs(VERTICAL_SCALES[i] - current),
+            )
+            # Wheel up = finer V/div, wheel down = coarser V/div.
+            idx = max(0, min(len(VERTICAL_SCALES) - 1, idx - direction))
+            new_value = VERTICAL_SCALES[idx]
+            self.channel_scale_vars[ch].set(self._format_vdiv(new_value))
+            self._schedule_wheel_apply("vertical", ch, new_value)
+
+        else:
+            try:
+                current = self._parse_time_div(self.time_scale_var.get())
+            except Exception:
+                current = 1e-3
+
+            idx = min(
+                range(len(TIME_SCALES)),
+                key=lambda i: abs(TIME_SCALES[i] - current),
+            )
+            # Wheel up = zoom in (smaller time/div), wheel down = zoom out.
+            idx = max(0, min(len(TIME_SCALES) - 1, idx - direction))
+            new_value = TIME_SCALES[idx]
+            self.time_scale_var.set(self._format_time_div(new_value))
+            self._schedule_wheel_apply("horizontal", None, new_value)
+
+        return "break"
+
+    def _schedule_wheel_apply(
+        self,
+        kind: str,
+        channel: str | None,
+        value: float,
+    ) -> None:
+        if self._wheel_after_id is not None:
+            try:
+                self.root.after_cancel(self._wheel_after_id)
+            except Exception:
+                pass
+
+        def apply() -> None:
+            self._wheel_after_id = None
+            if not self.client or not self.client.connected:
+                return
+            if kind == "vertical" and channel:
+                self._run_async(
+                    f"{channel} V/div {self._format_vdiv(value)}",
+                    lambda: self.client.set_channel_scale(channel, value),
+                    refresh_settings=True,
+                )
+            elif kind == "horizontal":
+                self._run_async(
+                    f"Time/div {self._format_time_div(value)}",
+                    lambda: self.client.set_horizontal_scale(value),
+                    refresh_settings=True,
+                )
+
+        self._wheel_after_id = self.root.after(120, apply)
 
     # ------------------------------------------------------------------
     # Save / export
