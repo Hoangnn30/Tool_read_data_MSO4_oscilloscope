@@ -80,7 +80,7 @@ class MSO4ScopeApp:
         window_h = min(900, max(700, screen_h - 90))
         self.root.geometry(f"{window_w}x{window_h}")
         self.root.resizable(False, False)
-        self.root.configure(bg="#0D1117")
+        self.root.configure(bg="#070B10")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.client: Optional[MSO4Client] = None
@@ -110,6 +110,7 @@ class MSO4ScopeApp:
         self.rate_var = tk.StringVar(value="Acq: -- fps")
         self.transfer_var = tk.StringVar(value="No waveform data yet")
         self.cursor_var = tk.StringVar(value="t = --    V = --")
+        self.connection_badge_var = tk.StringVar(value="● OFFLINE")
 
         self.points_var = tk.StringVar(value="2500")
         self.refresh_var = tk.StringVar(value="30")
@@ -149,9 +150,11 @@ class MSO4ScopeApp:
         self.scpi_result_var = tk.StringVar(value="Ready")
 
         self.measure_vars: dict[str, dict[str, tk.StringVar]] = {}
+        self.channel_cards: dict[str, tk.Frame] = {}
 
         self._setup_style()
         self._build_ui()
+        self._select_channel("CH1")
 
         self.root.after(30, self._process_command_queue)
         self.root.after(30, self._render_latest_frames)
@@ -167,45 +170,134 @@ class MSO4ScopeApp:
         except tk.TclError:
             pass
 
-        style.configure("Dark.TFrame", background="#111820")
-        style.configure("Panel.TFrame", background="#111820")
+        style.configure("Dark.TFrame", background="#0E151D")
+        style.configure("Panel.TFrame", background="#0E151D")
         style.configure(
             "Dark.TLabel",
-            background="#111820",
-            foreground="#D7DEE7",
+            background="#0E151D",
+            foreground="#DCE6F0",
             font=("Arial", 10),
         )
         style.configure(
             "Title.TLabel",
-            background="#111820",
-            foreground="#F0F4F8",
-            font=("Arial", 14, "bold"),
+            background="#0E151D",
+            foreground="#F7FAFC",
+            font=("Arial", 15, "bold"),
         )
         style.configure(
             "Section.TLabel",
-            background="#111820",
-            foreground="#8FA3B8",
+            background="#0E151D",
+            foreground="#8FA2B5",
             font=("Arial", 9, "bold"),
         )
-        style.configure("Dark.TButton", font=("Arial", 9, "bold"), padding=(5, 3))
+
+        style.configure(
+            "Dark.TButton",
+            background="#18232E",
+            foreground="#DCE6F0",
+            bordercolor="#30404F",
+            lightcolor="#18232E",
+            darkcolor="#18232E",
+            padding=(7, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map(
+            "Dark.TButton",
+            background=[("active", "#22313E"), ("disabled", "#111820")],
+            foreground=[("disabled", "#607080")],
+        )
+
+        style.configure(
+            "Primary.TButton",
+            background="#0F7A4D",
+            foreground="#FFFFFF",
+            bordercolor="#159661",
+            lightcolor="#0F7A4D",
+            darkcolor="#0F7A4D",
+            padding=(8, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", "#12945D"), ("disabled", "#153326")],
+            foreground=[("disabled", "#6F8B7D")],
+        )
+
+        style.configure(
+            "Stop.TButton",
+            background="#8F2F3A",
+            foreground="#FFFFFF",
+            bordercolor="#B44250",
+            lightcolor="#8F2F3A",
+            darkcolor="#8F2F3A",
+            padding=(8, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map("Stop.TButton", background=[("active", "#A83A47")])
+
+        style.configure(
+            "Action.TButton",
+            background="#175C8F",
+            foreground="#FFFFFF",
+            bordercolor="#247AB7",
+            lightcolor="#175C8F",
+            darkcolor="#175C8F",
+            padding=(7, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map(
+            "Action.TButton",
+            background=[("active", "#1E73AE"), ("disabled", "#172A38")],
+            foreground=[("disabled", "#6B7F8D")],
+        )
+
+        style.configure(
+            "Accent.TButton",
+            background="#5B45A5",
+            foreground="#FFFFFF",
+            bordercolor="#755EC8",
+            lightcolor="#5B45A5",
+            darkcolor="#5B45A5",
+            padding=(7, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map("Accent.TButton", background=[("active", "#7058C4")])
+
+        style.configure(
+            "Warn.TButton",
+            background="#8A5B13",
+            foreground="#FFFFFF",
+            bordercolor="#A8731C",
+            lightcolor="#8A5B13",
+            darkcolor="#8A5B13",
+            padding=(7, 4),
+            font=("Arial", 9, "bold"),
+        )
+        style.map("Warn.TButton", background=[("active", "#A46C17")])
+
         style.configure(
             "Dark.TCombobox",
-            fieldbackground="#0B1016",
-            background="#0B1016",
-            foreground="#E8EEF5",
-            arrowcolor="#E8EEF5",
+            fieldbackground="#091019",
+            background="#091019",
+            foreground="#EAF1F8",
+            arrowcolor="#B9C8D6",
+            bordercolor="#314151",
+            lightcolor="#091019",
+            darkcolor="#091019",
+            padding=(5, 3),
         )
         style.map(
             "Dark.TCombobox",
-            fieldbackground=[("readonly", "#0B1016")],
-            foreground=[("readonly", "#E8EEF5")],
+            fieldbackground=[("readonly", "#091019")],
+            foreground=[("readonly", "#EAF1F8")],
+            selectbackground=[("readonly", "#175C8F")],
         )
 
     def _build_ui(self) -> None:
         self._build_topbar()
 
         # Fixed three-column layout: no draggable sash, no side-panel scrolling.
-        body = tk.Frame(self.root, bg="#0D1117")
+        body = tk.Frame(self.root, bg="#070B10")
         body.pack(fill="both", expand=True, padx=10, pady=4)
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, minsize=300, weight=0)
@@ -225,14 +317,14 @@ class MSO4ScopeApp:
         left.pack_propagate(False)
         right.pack_propagate(False)
 
-        status = tk.Frame(self.root, bg="#0B0F14", height=28)
+        status = tk.Frame(self.root, bg="#080D12", height=28)
         status.pack(fill="x", padx=10, pady=(4, 8))
         status.pack_propagate(False)
 
         tk.Label(
             status,
             textvariable=self.status_var,
-            bg="#0B0F14",
+            bg="#080D12",
             fg="#B9C0C8",
             anchor="w",
             font=("Arial", 9),
@@ -241,50 +333,86 @@ class MSO4ScopeApp:
         tk.Label(
             status,
             textvariable=self.rate_var,
-            bg="#0B0F14",
+            bg="#080D12",
             fg="#B9C0C8",
             anchor="e",
             font=("Arial", 9),
         ).pack(side="right", padx=8, pady=4)
 
     def _build_topbar(self) -> None:
-        top = ttk.Frame(self.root, style="Dark.TFrame", padding=(12, 8))
+        top = ttk.Frame(self.root, style="Dark.TFrame", padding=(12, 9))
         top.pack(fill="x", padx=10, pady=(10, 6))
 
-        ttk.Label(top, text="MSO44B LAN SCOPE", style="Title.TLabel").pack(side="left")
+        brand = ttk.Frame(top, style="Dark.TFrame")
+        brand.pack(side="left")
+
+        ttk.Label(
+            brand,
+            text="MSO44B LAN SCOPE",
+            style="Title.TLabel",
+        ).pack(anchor="w")
+
+        tk.Label(
+            brand,
+            text="Tektronix 4 Series • TCPIP/VISA waveform monitor",
+            bg="#0E151D",
+            fg="#708396",
+            font=("Arial", 8),
+        ).pack(anchor="w", pady=(1, 0))
 
         controls = ttk.Frame(top, style="Dark.TFrame")
         controls.pack(side="right")
 
-        ttk.Label(controls, text="IP", style="Dark.TLabel").pack(side="left", padx=(0, 5))
+        self.connection_badge = tk.Label(
+            controls,
+            textvariable=self.connection_badge_var,
+            bg="#151C23",
+            fg="#7E8C99",
+            font=("Arial", 9, "bold"),
+            padx=8,
+            pady=5,
+        )
+        self.connection_badge.pack(side="left", padx=(0, 7))
+
+        tk.Label(
+            controls,
+            text="IP",
+            bg="#0E151D",
+            fg="#8FA2B5",
+            font=("Arial", 9, "bold"),
+        ).pack(side="left", padx=(0, 4))
 
         self.ip_entry = tk.Entry(
             controls,
             textvariable=self.ip_var,
-            width=15,
-            bg="#0B1016",
-            fg="#F0F4F8",
-            insertbackground="#F0F4F8",
+            width=14,
+            bg="#091019",
+            fg="#F0F5FA",
+            insertbackground="#F0F5FA",
             relief="flat",
+            highlightthickness=1,
+            highlightbackground="#30404F",
+            highlightcolor="#247AB7",
+            font=("Menlo", 9),
         )
-        self.ip_entry.pack(side="left", padx=(0, 6), ipady=5)
+        self.ip_entry.pack(side="left", padx=(0, 7), ipady=5)
 
         self.connect_btn = ttk.Button(
             controls,
             text="CONNECT",
             command=self._toggle_connection,
-            style="Dark.TButton",
+            style="Action.TButton",
         )
-        self.connect_btn.pack(side="left", padx=3)
+        self.connect_btn.pack(side="left", padx=2)
 
         self.run_btn = ttk.Button(
             controls,
             text="RUN",
             command=self._toggle_run,
-            style="Dark.TButton",
+            style="Primary.TButton",
             state="disabled",
         )
-        self.run_btn.pack(side="left", padx=3)
+        self.run_btn.pack(side="left", padx=2)
 
         self.single_btn = ttk.Button(
             controls,
@@ -293,40 +421,40 @@ class MSO4ScopeApp:
             style="Dark.TButton",
             state="disabled",
         )
-        self.single_btn.pack(side="left", padx=3)
+        self.single_btn.pack(side="left", padx=2)
 
         self.get_data_btn = ttk.Button(
             controls,
             text="GET DATA",
             command=self._get_data_once,
-            style="Dark.TButton",
+            style="Action.TButton",
             state="disabled",
         )
-        self.get_data_btn.pack(side="left", padx=3)
+        self.get_data_btn.pack(side="left", padx=2)
 
         self.autoset_btn = ttk.Button(
             controls,
             text="AUTOSET",
             command=self._autoset,
-            style="Dark.TButton",
+            style="Accent.TButton",
             state="disabled",
         )
-        self.autoset_btn.pack(side="left", padx=3)
+        self.autoset_btn.pack(side="left", padx=2)
 
         self.default_btn = ttk.Button(
             controls,
             text="DEFAULT",
             command=self._factory_default,
-            style="Dark.TButton",
+            style="Warn.TButton",
             state="disabled",
         )
-        self.default_btn.pack(side="left", padx=3)
+        self.default_btn.pack(side="left", padx=2)
 
     def _build_left_panel(self, parent) -> tk.Frame:
         outer = tk.Frame(
             parent,
-            bg="#111820",
-            highlightbackground="#26313D",
+            bg="#0E151D",
+            highlightbackground="#243342",
             highlightthickness=1,
         )
 
@@ -337,7 +465,7 @@ class MSO4ScopeApp:
 
         self._section_label(outer, "ACQUISITION", top_pad=8)
 
-        acq = tk.Frame(outer, bg="#111820")
+        acq = tk.Frame(outer, bg="#0E151D")
         acq.pack(fill="x", padx=8)
 
         self._form_label(acq, "Mode", 0)
@@ -378,14 +506,14 @@ class MSO4ScopeApp:
         )
         acq.columnconfigure(1, weight=1)
 
-        options = tk.Frame(outer, bg="#111820")
+        options = tk.Frame(outer, bg="#0E151D")
         options.pack(fill="x", padx=8, pady=(3, 2))
 
         tk.Checkbutton(
             options,
             text="Fast display",
             variable=self.fast_mode_var,
-            bg="#111820",
+            bg="#0E151D",
             fg="#D7DEE7",
             selectcolor="#0B1016",
             activebackground="#111820",
@@ -397,7 +525,7 @@ class MSO4ScopeApp:
             options,
             text="GET full record",
             variable=self.get_full_record_var,
-            bg="#111820",
+            bg="#0E151D",
             fg="#D7DEE7",
             selectcolor="#0B1016",
             activebackground="#111820",
@@ -414,7 +542,7 @@ class MSO4ScopeApp:
 
         self._section_label(outer, "SCPI", top_pad=6)
 
-        scpi_row = tk.Frame(outer, bg="#111820")
+        scpi_row = tk.Frame(outer, bg="#0E151D")
         scpi_row.pack(fill="x", padx=8)
         self.scpi_entry = self._dark_entry(scpi_row, self.scpi_var, 18)
         self.scpi_entry.pack(side="left", fill="x", expand=True, ipady=2)
@@ -432,7 +560,7 @@ class MSO4ScopeApp:
         tk.Label(
             outer,
             textvariable=self.scpi_result_var,
-            bg="#111820",
+            bg="#0E151D",
             fg="#93A0AD",
             justify="left",
             wraplength=275,
@@ -445,14 +573,22 @@ class MSO4ScopeApp:
     def _build_channel_card(self, parent, ch: str, color: str) -> None:
         card = tk.Frame(
             parent,
-            bg="#161E27",
-            highlightbackground="#273441",
+            bg="#121B24",
+            highlightbackground="#2B3B4B",
             highlightthickness=1,
         )
-        card.pack(fill="x", padx=8, pady=2)
+        card.pack(fill="x", padx=8, pady=3)
         card.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
+        self.channel_cards[ch] = card
 
-        row1 = tk.Frame(card, bg="#161E27")
+        accent = tk.Frame(card, bg=color, width=4)
+        accent.pack(side="left", fill="y")
+        accent.pack_propagate(False)
+
+        content = tk.Frame(card, bg="#121B24")
+        content.pack(side="left", fill="both", expand=True)
+
+        row1 = tk.Frame(content, bg="#121B24")
         row1.pack(fill="x", padx=5, pady=(3, 1))
 
         cb = tk.Checkbutton(
@@ -460,7 +596,7 @@ class MSO4ScopeApp:
             text=ch,
             variable=self.channel_vars[ch],
             command=lambda c=ch: self._channel_state_changed(c),
-            bg="#161E27",
+            bg="#121B24",
             fg=color,
             selectcolor="#0B1016",
             activebackground="#161E27",
@@ -469,7 +605,7 @@ class MSO4ScopeApp:
         )
         cb.pack(side="left")
 
-        tk.Label(row1, text="V/div", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(
+        tk.Label(row1, text="V/div", bg="#121B24", fg="#8FA3B8", font=("Arial", 8)).pack(
             side="left", padx=(5, 2)
         )
         ttk.Combobox(
@@ -485,18 +621,18 @@ class MSO4ScopeApp:
             row1,
             text="SET",
             command=lambda c=ch: self._apply_channel(c),
-            style="Dark.TButton",
+            style="Action.TButton",
         ).pack(side="right")
 
-        row2 = tk.Frame(card, bg="#161E27")
+        row2 = tk.Frame(content, bg="#121B24")
         row2.pack(fill="x", padx=5, pady=(1, 4))
 
-        tk.Label(row2, text="Pos", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
+        tk.Label(row2, text="Pos", bg="#121B24", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
         self._dark_entry(row2, self.channel_position_vars[ch], 5).pack(
             side="left", padx=(2, 5), ipady=1
         )
 
-        tk.Label(row2, text="Off", bg="#161E27", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
+        tk.Label(row2, text="Off", bg="#121B24", fg="#8FA3B8", font=("Arial", 8)).pack(side="left")
         self._dark_entry(row2, self.channel_offset_vars[ch], 5).pack(
             side="left", padx=(2, 5), ipady=1
         )
@@ -513,18 +649,18 @@ class MSO4ScopeApp:
     def _build_scope_panel(self, parent) -> tk.Frame:
         frame = tk.Frame(
             parent,
-            bg="#05070A",
-            highlightbackground="#26313D",
+            bg="#020609",
+            highlightbackground="#243342",
             highlightthickness=1,
         )
 
-        info = tk.Frame(frame, bg="#0B0F14")
+        info = tk.Frame(frame, bg="#080D12")
         info.pack(fill="x")
 
         tk.Label(
             info,
             textvariable=self.transfer_var,
-            bg="#0B0F14",
+            bg="#080D12",
             fg="#8FA3B8",
             anchor="w",
         ).pack(side="left", fill="x", expand=True, padx=6, pady=4)
@@ -533,7 +669,7 @@ class MSO4ScopeApp:
             info,
             text="4CH STACK",
             command=self._stack_four_channels,
-            style="Dark.TButton",
+            style="Accent.TButton",
         ).pack(side="right", padx=3)
 
         ttk.Button(
@@ -547,7 +683,7 @@ class MSO4ScopeApp:
             info,
             text="AUTO SCALE",
             command=self._autoscale,
-            style="Dark.TButton",
+            style="Action.TButton",
         ).pack(side="right", padx=3)
 
         ttk.Button(
@@ -566,7 +702,7 @@ class MSO4ScopeApp:
 
         self.canvas = tk.Canvas(
             frame,
-            bg="#05070A",
+            bg="#020609",
             highlightthickness=0,
             cursor="crosshair",
         )
@@ -580,7 +716,7 @@ class MSO4ScopeApp:
         tk.Label(
             frame,
             textvariable=self.cursor_var,
-            bg="#0B0F14",
+            bg="#080D12",
             fg="#93A0AD",
             anchor="w",
         ).pack(fill="x", padx=6, pady=3)
@@ -590,13 +726,13 @@ class MSO4ScopeApp:
     def _build_right_panel(self, parent) -> tk.Frame:
         outer = tk.Frame(
             parent,
-            bg="#111820",
-            highlightbackground="#26313D",
+            bg="#0E151D",
+            highlightbackground="#243342",
             highlightthickness=1,
         )
 
         self._section_label(outer, "HORIZONTAL", top_pad=7)
-        horizontal = tk.Frame(outer, bg="#111820")
+        horizontal = tk.Frame(outer, bg="#0E151D")
         horizontal.pack(fill="x", padx=8)
 
         self._form_label(horizontal, "Time/div", 0)
@@ -623,7 +759,7 @@ class MSO4ScopeApp:
         ).pack(fill="x", padx=8, pady=(3, 4))
 
         self._section_label(outer, "TRIGGER", top_pad=5)
-        trigger = tk.Frame(outer, bg="#111820")
+        trigger = tk.Frame(outer, bg="#0E151D")
         trigger.pack(fill="x", padx=8)
 
         self._form_label(trigger, "Source", 0)
@@ -669,7 +805,7 @@ class MSO4ScopeApp:
             style="Dark.TButton",
         ).pack(fill="x", padx=8, pady=(3, 2))
 
-        trig_buttons = tk.Frame(outer, bg="#111820")
+        trig_buttons = tk.Frame(outer, bg="#0E151D")
         trig_buttons.pack(fill="x", padx=8)
         ttk.Button(
             trig_buttons,
@@ -688,8 +824,8 @@ class MSO4ScopeApp:
 
         table = tk.Frame(
             outer,
-            bg="#161E27",
-            highlightbackground="#273441",
+            bg="#121B24",
+            highlightbackground="#2B3B4B",
             highlightthickness=1,
         )
         table.pack(fill="x", padx=8, pady=2)
@@ -703,12 +839,12 @@ class MSO4ScopeApp:
             ("max", "Max"),
         ]
 
-        tk.Label(table, text="", bg="#161E27").grid(row=0, column=0, padx=3, pady=2)
+        tk.Label(table, text="", bg="#121B24").grid(row=0, column=0, padx=3, pady=2)
         for col, (ch, color) in enumerate(CHANNEL_COLORS.items(), start=1):
             tk.Label(
                 table,
                 text=ch,
-                bg="#161E27",
+                bg="#121B24",
                 fg=color,
                 font=("Arial", 8, "bold"),
             ).grid(row=0, column=col, padx=3, pady=2)
@@ -717,7 +853,7 @@ class MSO4ScopeApp:
             tk.Label(
                 table,
                 text=caption,
-                bg="#161E27",
+                bg="#121B24",
                 fg="#AEB8C2",
                 font=("Arial", 8),
                 anchor="w",
@@ -731,7 +867,7 @@ class MSO4ScopeApp:
                 tk.Label(
                     table,
                     textvariable=var,
-                    bg="#161E27",
+                    bg="#121B24",
                     fg="#F0F4F8",
                     font=("Menlo", 7),
                     width=8,
@@ -751,7 +887,7 @@ class MSO4ScopeApp:
         tk.Label(
             outer,
             text="Wheel: move selected CH | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div",
-            bg="#111820",
+            bg="#0E151D",
             fg="#708090",
             font=("Arial", 8),
             anchor="center",
@@ -760,13 +896,16 @@ class MSO4ScopeApp:
         return outer
 
     def _section_label(self, parent, text: str, top_pad: int = 10) -> None:
+        row = tk.Frame(parent, bg="#0E151D")
+        row.pack(fill="x", padx=8, pady=(top_pad, 5))
+        tk.Frame(row, bg="#247AB7", width=3, height=14).pack(side="left", padx=(0, 6))
         tk.Label(
-            parent,
+            row,
             text=text,
-            bg="#111820",
-            fg="#8FA3B8",
+            bg="#0E151D",
+            fg="#B6C7D8",
             font=("Arial", 9, "bold"),
-        ).pack(anchor="w", padx=12, pady=(top_pad, 6))
+        ).pack(side="left")
 
     @staticmethod
     def _form_label(parent, text: str, row: int) -> None:
@@ -783,10 +922,13 @@ class MSO4ScopeApp:
             parent,
             textvariable=variable,
             width=width,
-            bg="#0B1016",
-            fg="#F0F4F8",
-            insertbackground="#F0F4F8",
+            bg="#091019",
+            fg="#F0F5FA",
+            insertbackground="#F0F5FA",
             relief="flat",
+            highlightthickness=1,
+            highlightbackground="#30404F",
+            highlightcolor="#247AB7",
         )
 
     # ------------------------------------------------------------------
@@ -838,6 +980,8 @@ class MSO4ScopeApp:
         self.ip_entry.configure(state="normal")
 
         self.status_var.set("Disconnected")
+        self.connection_badge_var.set("● OFFLINE")
+        self.connection_badge.configure(bg="#1D1719", fg="#A8767A")
         self.rate_var.set("Acq: -- fps")
         self.transfer_var.set("No waveform data yet")
 
@@ -1132,7 +1276,7 @@ class MSO4ScopeApp:
         self.channel_errors.clear()
         self._need_autoscale = True
 
-        self.run_btn.configure(text="STOP")
+        self.run_btn.configure(text="STOP", style="Stop.TButton")
         self.status_var.set("Starting acquisition...")
         self.transfer_var.set("Waiting for waveform...")
 
@@ -1220,7 +1364,7 @@ class MSO4ScopeApp:
 
     def _stop_acquisition(self, local_only: bool = False) -> None:
         self.stop_event.set()
-        self.run_btn.configure(text="RUN")
+        self.run_btn.configure(text="RUN", style="Primary.TButton")
         self.rate_var.set("Acq: -- fps")
 
         if not local_only and self.client and self.client.connected:
@@ -1411,7 +1555,7 @@ class MSO4ScopeApp:
                 height / 2 - 3,
                 x,
                 height / 2 + 3,
-                fill="#39424C",
+                fill="#263440",
             )
 
     def _draw_channel_markers(
@@ -1496,6 +1640,8 @@ class MSO4ScopeApp:
                     self.scpi_btn.configure(state="normal")
                     self.ip_entry.configure(state="disabled")
                     self.status_var.set(f"Connected: {idn}")
+                    self.connection_badge_var.set("● ONLINE")
+                    self.connection_badge.configure(bg="#10271C", fg="#6DDB9E")
                     self.scpi_result_var.set(idn)
                     self._apply_settings_to_ui(settings)
                     self._redraw_scope()
@@ -1636,6 +1782,13 @@ class MSO4ScopeApp:
     def _select_channel(self, channel: str) -> None:
         if channel in CHANNEL_COLORS:
             self._selected_channel = channel
+            for ch, card in self.channel_cards.items():
+                card.configure(
+                    highlightbackground=(
+                        CHANNEL_COLORS[ch] if ch == channel else "#2B3B4B"
+                    ),
+                    highlightthickness=(2 if ch == channel else 1),
+                )
             self.status_var.set(
                 f"Selected {channel} | display {self.display_offset_div.get(channel, 0.0):+.2f} div"
             )
