@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -88,14 +89,43 @@ class AutomationEngine:
 
         return results
 
+    @staticmethod
+    def _get_path(source: dict[str, Any], path: str) -> Any:
+        current: Any = source
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                raise KeyError(path)
+            current = current[part]
+        return current
+
     def _resolve(self, value: Any, profile: dict[str, Any]) -> Any:
-        if isinstance(value, str) and value.startswith("$profile."):
-            key = value.removeprefix("$profile.")
-            return profile[key]
-        if isinstance(value, str) and value.startswith("$value."):
-            key = value.removeprefix("$value.")
-            return self.values[key]
-        return value
+        if isinstance(value, dict):
+            return {key: self._resolve(item, profile) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._resolve(item, profile) for item in value]
+
+        if not isinstance(value, str):
+            return value
+
+        full_profile = re.fullmatch(r"\$profile\.([A-Za-z0-9_.-]+)", value)
+        if full_profile:
+            return self._get_path(profile, full_profile.group(1))
+
+        full_saved = re.fullmatch(r"\$value\.([A-Za-z0-9_.-]+)", value)
+        if full_saved:
+            return self._get_path(self.values, full_saved.group(1))
+
+        def substitute(match: re.Match[str]) -> str:
+            namespace = match.group(1)
+            path = match.group(2)
+            source = profile if namespace == "profile" else self.values
+            return str(self._get_path(source, path))
+
+        return re.sub(
+            r"\$(profile|value)\.([A-Za-z0-9_.-]+)",
+            substitute,
+            value,
+        )
 
     def _execute(self, step: TestStep, profile: dict[str, Any]) -> Any:
         driver = self.registry.get_driver(step.device)
