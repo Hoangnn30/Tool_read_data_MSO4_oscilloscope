@@ -449,28 +449,47 @@ class MSO4Client:
         start: int = 1,
         stop: int = 5000,
     ) -> None:
-        """Cache waveform scaling for fast continuous display."""
+        """Prepare a full-record, resampled binary transfer for fast display.
+
+        The oscilloscope record itself is left untouched. DATA:RESAMPLE reduces
+        LAN traffic while preserving the full horizontal time span.
+        """
         ch = self._validate_channel(channel)
-        start = max(1, int(start))
-        stop = max(start, int(stop))
+        desired_points = max(200, int(stop))
 
         with self._lock:
             inst = self._require_instrument()
+
+            record_length = self.get_record_length()
+            if record_length is None or record_length <= 0:
+                record_length = desired_points
+
+            data_start = 1
+            data_stop = int(record_length)
+            resample = max(1, int(np.ceil(record_length / desired_points)))
+
             inst.write(f"DATA:SOURCE {ch}")
-            inst.write(f"DATA:START {start}")
-            inst.write(f"DATA:STOP {stop}")
+            inst.write(f"DATA:START {data_start}")
+            inst.write(f"DATA:STOP {data_stop}")
+            inst.write(f"DATA:RESAMPLE {resample}")
             inst.write("DATA:ENCDG RIBINARY")
             inst.write("DATA:WIDTH 1")
 
+            # Query the preamble only after DATA:RESAMPLE is set because the
+            # outgoing waveform timing metadata corresponds to the transfer.
             pre = self._read_preamble()
+
             try:
                 transfer_points = self.query_int("WFMOUTPRE:NR_PT?")
             except Exception:
-                transfer_points = stop - start + 1
+                transfer_points = int(np.ceil(record_length / resample))
 
             self._fast_transfer_cache[ch] = {
-                "start": start,
-                "stop": stop,
+                "desired_points": desired_points,
+                "data_start": data_start,
+                "data_stop": data_stop,
+                "record_length": int(record_length),
+                "resample": int(resample),
                 "pre": pre,
                 "transfer_points": max(1, int(transfer_points)),
             }
@@ -481,30 +500,32 @@ class MSO4Client:
         start: int = 1,
         stop: int = 5000,
     ) -> Waveform:
-        """Fast display path: one source select + one binary CURVE? per frame.
-
-        Scaling metadata is cached. Use get_waveform() for exact/full GET DATA.
-        """
+        """Fast display path using DATA:RESAMPLE across the complete record."""
         ch = self._validate_channel(channel)
-        start = max(1, int(start))
-        stop = max(start, int(stop))
+        desired_points = max(200, int(stop))
 
         cached = self._fast_transfer_cache.get(ch)
         if (
             cached is None
-            or int(cached.get("start", -1)) != start
-            or int(cached.get("stop", -1)) != stop
+            or int(cached.get("desired_points", -1)) != desired_points
         ):
-            self.prepare_fast_waveform(ch, start, stop)
+            self.prepare_fast_waveform(ch, 1, desired_points)
             cached = self._fast_transfer_cache[ch]
 
         pre = cached["pre"]
         transfer_points = int(cached["transfer_points"])
+        record_length = int(cached["record_length"])
+        resample = int(cached["resample"])
 
         with self._lock:
             inst = self._require_instrument()
             try:
                 inst.write(f"DATA:SOURCE {ch}")
+                # Re-assert resample because DATA settings are global and another
+                # transfer mode may have changed them.
+                inst.write(f"DATA:START {int(cached['data_start'])}")
+                inst.write(f"DATA:STOP {int(cached['data_stop'])}")
+                inst.write(f"DATA:RESAMPLE {resample}")
                 samples = inst.query_binary_values(
                     "CURVE?",
                     datatype="b",
@@ -512,15 +533,20 @@ class MSO4Client:
                     container=np.array,
                 )
             except Exception:
-                # Rebuild cache once after a transport/settings mismatch.
                 self._recover_session(inst)
                 self._fast_transfer_cache.pop(ch, None)
-                self.prepare_fast_waveform(ch, start, stop)
+                self.prepare_fast_waveform(ch, 1, desired_points)
                 cached = self._fast_transfer_cache[ch]
                 pre = cached["pre"]
                 transfer_points = int(cached["transfer_points"])
+                record_length = int(cached["record_length"])
+                resample = int(cached["resample"])
+
                 inst = self._require_instrument()
                 inst.write(f"DATA:SOURCE {ch}")
+                inst.write(f"DATA:START {int(cached['data_start'])}")
+                inst.write(f"DATA:STOP {int(cached['data_stop'])}")
+                inst.write(f"DATA:RESAMPLE {resample}")
                 samples = inst.query_binary_values(
                     "CURVE?",
                     datatype="b",
@@ -533,16 +559,20 @@ class MSO4Client:
             raise MSO4Error(f"{ch} returned zero waveform points.")
 
         n = raw.size
+
+        # Tektronix WFMOUTPRE timing values are queried after resampling, so the
+        # resulting X axis remains tied to the actual trigger location.
         x = pre.xzero + (
             np.arange(n, dtype=np.float64) - pre.pt_off
         ) * pre.xincr
         y = (raw - pre.yoff) * pre.ymult + pre.yzero
 
         self._last_transfer_info[ch] = {
-            "mode": "FAST-BINARY",
+            "mode": "FAST-RESAMPLE",
             "points": int(n),
             "reported_points": int(transfer_points),
-            "record_length": None,
+            "record_length": int(record_length),
+            "resample": int(resample),
             "xincr": float(pre.xincr),
             "xzero": float(pre.xzero),
             "pt_off": float(pre.pt_off),
@@ -554,6 +584,7 @@ class MSO4Client:
             "voltage_min": float(np.min(y)) if n else None,
             "voltage_max": float(np.max(y)) if n else None,
         }
+
         return Waveform(channel=ch, time_s=x, volts=y)
 
     def get_waveform(
@@ -636,6 +667,7 @@ class MSO4Client:
         inst.write(f"DATA:SOURCE {ch}")
         inst.write(f"DATA:START {start}")
         inst.write(f"DATA:STOP {stop}")
+        inst.write("DATA:RESAMPLE 1")
 
         if encoding == "BINARY":
             inst.write("DATA:ENCDG RIBINARY")
