@@ -302,19 +302,31 @@ class MSO4Client:
         self.write(f"HORIZONTAL:POSITION {value:.12g}")
         self.invalidate_waveform_cache()
 
-    def enter_realtime_mode(self, record_points: int = 5000) -> dict[str, float | int | None]:
-        """Temporarily shorten the acquisition record without changing Time/div.
+    def enter_realtime_mode(
+        self,
+        record_points: int = 5000,
+        time_scale: float | None = None,
+    ) -> dict[str, float | int | bool | None]:
+        """Try a short realtime record without ever changing user Time/div.
 
-        TekHSI transfers the acquired record. Keeping the realtime record small
-        lowers first-frame latency and bandwidth. The user's horizontal scale is
-        explicitly reapplied and read back after the record-length change.
+        If the oscilloscope clamps HORIZONTAL:MODE:SCALE after shortening the
+        record, immediately restore the original record length and re-apply the
+        requested Time/div. Correct horizontal scale has priority over speed.
         """
         target = max(1000, int(record_points))
 
+        original_record = self.get_record_length(force=True)
         if self._realtime_saved_record_length is None:
-            self._realtime_saved_record_length = self.get_record_length(force=True)
+            self._realtime_saved_record_length = original_record
 
-        requested_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+        requested_scale = (
+            float(time_scale)
+            if time_scale is not None
+            else self.query_float("HORIZONTAL:MODE:SCALE?")
+        )
+        if requested_scale <= 0:
+            raise ValueError("Time/div must be > 0.")
+
         self._realtime_time_scale = requested_scale
 
         self.write("HORIZONTAL:MODE MANUAL")
@@ -324,10 +336,27 @@ class MSO4Client:
         actual_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
         actual_record = self.get_record_length(force=True)
 
+        tolerance = max(abs(requested_scale) * 0.002, 1e-15)
+        short_record_applied = abs(actual_scale - requested_scale) <= tolerance
+
+        if not short_record_applied:
+            # The short record forced a different Time/div (commonly 500 us/div).
+            # Restore the original record first, then apply the user's scale again.
+            if original_record and original_record > 0:
+                self.write(
+                    f"HORIZONTAL:MODE:RECORDLENGTH {int(original_record)}"
+                )
+            self.write(f"HORIZONTAL:MODE:SCALE {requested_scale:.12g}")
+
+            actual_scale = self.query_float("HORIZONTAL:MODE:SCALE?")
+            actual_record = self.get_record_length(force=True)
+
         self.invalidate_waveform_cache()
         return {
             "record_length": actual_record,
             "horizontal_scale": actual_scale,
+            "requested_horizontal_scale": requested_scale,
+            "short_record_applied": short_record_applied,
         }
 
     def exit_realtime_mode(self) -> dict[str, float | int | None]:
