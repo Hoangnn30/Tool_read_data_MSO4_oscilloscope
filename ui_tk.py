@@ -161,6 +161,7 @@ class MSO4ScopeApp:
         self.scope_sync_var = tk.StringVar(value="SCALE --")
 
         self.time_scale_var = tk.StringVar(value="1 ms/div")
+        self._user_time_div_s = 1e-3
         self.horizontal_position_var = tk.StringVar(value="50")
 
         self.trigger_source_var = tk.StringVar(value="CH1")
@@ -1465,9 +1466,12 @@ class MSO4ScopeApp:
             messagebox.showwarning("Horizontal", f"Invalid value: {exc}")
             return
 
+        self._user_time_div_s = scale
+
         def command() -> None:
-            self.client.set_horizontal_scale(scale)
+            actual = self.client.set_horizontal_scale(scale)
             self.client.set_horizontal_position(position)
+            return actual
 
         self.scope_sync_var.set("SCALE PENDING")
         self._run_async("Applying horizontal", command, refresh_settings=True)
@@ -1732,7 +1736,8 @@ class MSO4ScopeApp:
             try:
                 if fast_mode:
                     realtime_info = self.client.enter_realtime_mode(
-                        record_points=max(2000, min(10000, fast_record))
+                        record_points=max(2000, min(10000, fast_record)),
+                        time_scale=self._user_time_div_s,
                     )
                     self.command_queue.put(
                         ("realtime_mode", realtime_info)
@@ -2695,22 +2700,24 @@ class MSO4ScopeApp:
                 elif kind == "realtime_mode":
                     info = msg[1] or {}
                     record = info.get("record_length")
-                    scale = info.get("horizontal_scale")
-                    if scale:
-                        self.time_scale_var.set(
-                            self._format_time_div(float(scale))
-                        )
-                    self.transfer_var.set(
-                        f"Realtime record {record or '?'} pts"
+                    short_ok = bool(info.get("short_record_applied", True))
+                    self.time_scale_var.set(
+                        self._format_time_div(self._user_time_div_s)
                     )
+                    if short_ok:
+                        self.transfer_var.set(
+                            f"Realtime record {record or '?'} pts"
+                        )
+                    else:
+                        self.transfer_var.set(
+                            f"Time/div locked at "
+                            f"{self._format_time_div(self._user_time_div_s)}"
+                        )
 
                 elif kind == "realtime_restored":
-                    info = msg[1] or {}
-                    scale = info.get("horizontal_scale")
-                    if scale:
-                        self.time_scale_var.set(
-                            self._format_time_div(float(scale))
-                        )
+                    self.time_scale_var.set(
+                        self._format_time_div(self._user_time_div_s)
+                    )
                     self._redraw_scope()
 
                 elif kind == "transport":
@@ -2794,9 +2801,17 @@ class MSO4ScopeApp:
             return
 
         if "horizontal_scale" in settings:
-            self.time_scale_var.set(
-                self._format_time_div(float(settings["horizontal_scale"]))
-            )
+            actual_time_div = float(settings["horizontal_scale"])
+            running = bool(self.acq_thread and self.acq_thread.is_alive())
+            if not running:
+                self._user_time_div_s = actual_time_div
+                self.time_scale_var.set(
+                    self._format_time_div(actual_time_div)
+                )
+            else:
+                self.time_scale_var.set(
+                    self._format_time_div(self._user_time_div_s)
+                )
 
         if "horizontal_position" in settings:
             self.horizontal_position_var.set(
@@ -3046,6 +3061,7 @@ class MSO4ScopeApp:
                     refresh_settings=True,
                 )
             elif kind == "horizontal":
+                self._user_time_div_s = value
                 self._run_async(
                     f"Time/div {self._format_time_div(value)}",
                     lambda: self.client.set_horizontal_scale(value),
