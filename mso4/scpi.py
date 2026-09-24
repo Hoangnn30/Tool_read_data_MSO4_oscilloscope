@@ -398,28 +398,23 @@ class MSO4Client:
                 # even if firmware rejects the record-length adjustment.
                 pass
 
-        for ch in self.CHANNELS:
+        # Start with the minimum SCPI traffic needed for first waveform.
+        # Enable requested channels only; do not spend time toggling every unused
+        # channel or querying record length before RUN becomes active.
+        for ch in clean:
             try:
-                self.set_channel_state(ch, ch in clean)
+                self.set_channel_state(ch, True)
             except Exception:
                 pass
 
-        # Configure binary transfer once. RUN frames will reuse this setup and
-        # cached waveform preambles instead of issuing many small LAN queries.
         self.invalidate_waveform_cache()
         with self._lock:
             inst = self._require_instrument()
+            inst.write("DATA:MODE VECTOR")
             inst.write("DATA:ENCDG RIBINARY")
             inst.write("DATA:WIDTH 1")
 
         self.run_acquisition()
-
-        # Cache once for subsequent fast waveform setup. Avoid repeating this
-        # LAN round-trip for every channel before its first frame.
-        try:
-            self.get_record_length(force=True)
-        except Exception:
-            pass
 
     def get_record_length(self, force: bool = False) -> int | None:
         if not force and self._record_length_cache:
