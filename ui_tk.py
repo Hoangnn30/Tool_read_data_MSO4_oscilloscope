@@ -108,6 +108,7 @@ class MSO4ScopeApp:
         self._need_autoscale = True
         self._closing = False
         self._last_draw = 0.0
+        self._scope_static_key = None
         self._wheel_after_id = None
         self._selected_channel = "CH1"
         self.display_offset_div = {ch: 0.0 for ch in CHANNEL_COLORS}
@@ -122,7 +123,7 @@ class MSO4ScopeApp:
         self.points_var = tk.StringVar(value="2500")
         self.refresh_var = tk.StringVar(value="30")
         self.fast_mode_var = tk.BooleanVar(value=True)
-        self.fast_record_var = tk.StringVar(value="5000")
+        self.fast_record_var = tk.StringVar(value="2500")
         self.get_full_record_var = tk.BooleanVar(value=True)
 
         self.channel_vars = {
@@ -1313,6 +1314,7 @@ class MSO4ScopeApp:
         self.waveforms.clear()
         self.x_range = None
         self.y_range = None
+        self._scope_static_key = None
         self._redraw_scope()
 
     def _run_async(self, description: str, fn, refresh_settings: bool = False) -> None:
@@ -1591,7 +1593,10 @@ class MSO4ScopeApp:
             fast_record = max(500, int(self.fast_record_var.get()))
             fast_mode = bool(self.fast_mode_var.get())
             if fast_mode:
-                points = fast_record
+                # Keep total display bandwidth bounded as more channels are enabled.
+                # 1CH: up to requested points, 4CH: about 1/4 per channel.
+                per_channel_budget = max(800, int(5000 / max(1, len(channels))))
+                points = min(fast_record, per_channel_budget)
         except ValueError:
             messagebox.showwarning(
                 "Acquisition",
@@ -1768,8 +1773,8 @@ class MSO4ScopeApp:
                         self.scope_sync_label.configure(bg="#35181B", fg="#FF7680")
 
             now = time.monotonic()
-            # Cap drawing around 30 FPS even when LAN acquisition is faster.
-            if now - self._last_draw >= 1.0 / 30.0:
+            # Tk Canvas is most responsive when draw work stays below acquisition rate.
+            if now - self._last_draw >= 1.0 / 24.0:
                 if self._need_autoscale:
                     self._autoscale()
                     self._need_autoscale = False
@@ -1823,9 +1828,27 @@ class MSO4ScopeApp:
         height = max(20, c.winfo_height())
         g = self._scope_geometry(width, height)
 
-        c.delete("all")
-        self._draw_grid(width, height, g)
-        self._draw_scale_rulers(g)
+        # Redraw grid/rulers only when geometry or scope scale changes.
+        static_key = (
+            width,
+            height,
+            self.time_scale_var.get(),
+            self.horizontal_position_var.get(),
+            self._selected_channel,
+            self.channel_scale_vars[self._selected_channel].get(),
+            self.channel_position_vars[self._selected_channel].get(),
+            self.channel_offset_vars[self._selected_channel].get(),
+        )
+        static_changed = static_key != self._scope_static_key
+
+        if static_changed:
+            c.delete("all")
+            self._draw_grid(width, height, g)
+            self._draw_scale_rulers(g)
+            c.addtag_all("scope_static")
+            self._scope_static_key = static_key
+        else:
+            c.delete("wave_dynamic")
 
         active = [
             ch
@@ -1852,6 +1875,7 @@ class MSO4ScopeApp:
             fill="#C88A2D",
             width=1,
             dash=(3, 4),
+            tags=("wave_dynamic",),
         )
         c.create_polygon(
             trigger_x - 6,
@@ -1862,6 +1886,7 @@ class MSO4ScopeApp:
             g["top"] + 8,
             fill="#F1A93A",
             outline="",
+            tags=("wave_dynamic",),
         )
 
         if not active:
@@ -1876,6 +1901,7 @@ class MSO4ScopeApp:
                 text=message,
                 fill="#566778",
                 font=("Arial", 13, "bold"),
+                tags=("wave_dynamic",),
             )
             self._update_scope_badges()
             return
@@ -1928,6 +1954,7 @@ class MSO4ScopeApp:
                 fill=CHANNEL_COLORS[ch],
                 width=(2.4 if ch == self._selected_channel else 1.7),
                 smooth=False,
+                tags=("wave_dynamic",),
             )
 
             self._draw_channel_reference_marker(
@@ -2091,6 +2118,7 @@ class MSO4ScopeApp:
             py + 7,
             fill=color,
             outline="",
+            tags=("wave_dynamic",),
         )
         self.canvas.create_text(
             g["left"] + 14,
@@ -2099,6 +2127,7 @@ class MSO4ScopeApp:
             fill=color,
             anchor="w",
             font=("Arial", 7, "bold"),
+            tags=("wave_dynamic",),
         )
 
     def _draw_trigger_level(self, g: dict[str, float]) -> None:
@@ -2135,6 +2164,7 @@ class MSO4ScopeApp:
             fill="#7A5825",
             width=1,
             dash=(2, 5),
+            tags=("wave_dynamic",),
         )
         self.canvas.create_polygon(
             g["right"],
@@ -2145,6 +2175,7 @@ class MSO4ScopeApp:
             py + 6,
             fill="#F1A93A",
             outline="",
+            tags=("wave_dynamic",),
         )
         self.canvas.create_text(
             g["right"] - 13,
@@ -2153,6 +2184,7 @@ class MSO4ScopeApp:
             fill="#F1A93A",
             anchor="e",
             font=("Arial", 7, "bold"),
+            tags=("wave_dynamic",),
         )
 
     def _update_scope_badges(self) -> None:
