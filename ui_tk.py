@@ -93,6 +93,9 @@ class MSO4ScopeApp:
         self.client: Optional[MSO4Client] = None
         self.acq_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
+        self._acq_generation = 0
+        self._channel_apply_after_id = None
+        self._resume_after_channel_change = False
         self.command_queue: queue.Queue = queue.Queue()
 
         # Waveform data shared between acquisition and UI.
@@ -1338,21 +1341,86 @@ class MSO4ScopeApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _channel_state_changed(self, ch: str) -> None:
-        enabled = self.channel_vars[ch].get()
-        if self.client and self.client.connected:
-            self._run_async(
-                f"{ch} {'ON' if enabled else 'OFF'}",
-                lambda: self.client.set_channel_state(ch, enabled),
-            )
+        enabled = bool(self.channel_vars[ch].get())
 
-        if not enabled:
-            self.waveforms.pop(ch, None)
+        if enabled:
+            self._select_channel(ch)
 
-        if self.acq_thread and self.acq_thread.is_alive():
+        # Never reuse stale data when a channel is toggled.
+        with self.frame_lock:
+            self.latest_frames.pop(ch, None)
+        self.waveforms.pop(ch, None)
+        self.measurements.pop(ch, None)
+
+        for var in self.measure_vars.get(ch, {}).values():
+            var.set("--")
+
+        item_id = self._wave_items.get(ch)
+        if item_id is not None:
+            try:
+                self.canvas.itemconfigure(item_id, state="hidden")
+            except tk.TclError:
+                self._wave_items.pop(ch, None)
+
+        was_running = bool(self.acq_thread and self.acq_thread.is_alive())
+        self._resume_after_channel_change = (
+            self._resume_after_channel_change or was_running
+        )
+
+        if was_running:
             self._stop_acquisition(local_only=True)
-            self.root.after(80, self._start_acquisition)
-        else:
+
+        # Multiple fast checkbox clicks collapse into one VISA update/restart.
+        if self._channel_apply_after_id is not None:
+            try:
+                self.root.after_cancel(self._channel_apply_after_id)
+            except Exception:
+                pass
+
+        self._channel_apply_after_id = self.root.after(
+            140,
+            self._apply_channel_selection,
+        )
+        self._redraw_scope()
+
+    def _apply_channel_selection(self) -> None:
+        self._channel_apply_after_id = None
+
+        active = [
+            ch
+            for ch, var in self.channel_vars.items()
+            if bool(var.get())
+        ]
+        resume = self._resume_after_channel_change
+        self._resume_after_channel_change = False
+
+        if not self.client or not self.client.connected:
             self._redraw_scope()
+            return
+
+        self.status_var.set(
+            "Applying channels: " + (", ".join(active) if active else "none")
+        )
+
+        def worker() -> None:
+            try:
+                # One serialized VISA transaction sequence: physical scope state
+                # exactly follows the UI checkbox state.
+                for channel in CHANNEL_COLORS:
+                    self.client.set_channel_state(
+                        channel,
+                        channel in active,
+                    )
+
+                self.command_queue.put(
+                    ("channel_selection_applied", active, resume)
+                )
+            except Exception as exc:
+                self.command_queue.put(
+                    ("command_error", "Channel selection", str(exc))
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_channel(self, ch: str) -> None:
         try:
@@ -1608,7 +1676,13 @@ class MSO4ScopeApp:
             )
             return
 
-        self.stop_event.clear()
+        # A RUN owns its own stop event and generation. A blocked old
+        # VXI-11 read can finish later, but it cannot publish a stale frame.
+        self._acq_generation += 1
+        generation = self._acq_generation
+        session_stop = threading.Event()
+        self.stop_event = session_stop
+
         self.channel_errors.clear()
         self._need_autoscale = True
 
@@ -1646,12 +1720,18 @@ class MSO4ScopeApp:
 
             # Round-robin: one CURVE? transaction per loop. This avoids waiting
             # for all 4 channels before the UI gets a new frame.
-            while not self.stop_event.is_set():
+            while not session_stop.is_set() and generation == self._acq_generation:
                 started = time.monotonic()
                 ch = ordered_channels[channel_index]
                 channel_index = (channel_index + 1) % len(ordered_channels)
 
-                successful = self._acquire_one_frame([ch], points, exact=False)
+                successful = self._acquire_one_frame(
+                    [ch],
+                    points,
+                    exact=False,
+                    stop_event=session_stop,
+                    generation=generation,
+                )
 
                 if successful:
                     if updates == 0:
@@ -1681,7 +1761,7 @@ class MSO4ScopeApp:
                 elapsed_ms = (time.monotonic() - started) * 1000.0
                 remaining = max(0.0, per_tick_ms - elapsed_ms)
                 if remaining:
-                    self.stop_event.wait(remaining / 1000.0)
+                    session_stop.wait(remaining / 1000.0)
 
         self.acq_thread = threading.Thread(target=worker, daemon=True)
         self.acq_thread.start()
@@ -1691,11 +1771,15 @@ class MSO4ScopeApp:
         channels: list[str],
         points: int,
         exact: bool = False,
+        stop_event: threading.Event | None = None,
+        generation: int | None = None,
     ) -> int:
         successful = 0
 
         for ch in channels:
-            if self.stop_event.is_set():
+            if stop_event is not None and stop_event.is_set():
+                break
+            if generation is not None and generation != self._acq_generation:
                 break
 
             try:
@@ -1704,6 +1788,11 @@ class MSO4ScopeApp:
                 else:
                     waveform = self.client.get_waveform_fast(ch, 1, points)
                 info = self.client.get_last_transfer_info(ch)
+
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if generation is not None and generation != self._acq_generation:
+                    break
 
                 now = time.monotonic()
                 if exact or (now - self._last_measure_update.get(ch, 0.0) >= 0.20):
@@ -1729,6 +1818,7 @@ class MSO4ScopeApp:
         return successful
 
     def _stop_acquisition(self, local_only: bool = False) -> None:
+        self._acq_generation += 1
         self.stop_event.set()
         self.run_btn.configure(text="RUN", style="Primary.TButton")
         self.rate_var.set("Acq: -- fps")
@@ -1757,8 +1847,14 @@ class MSO4ScopeApp:
 
         if frames:
             latest_status = None
+            selected_channels = {
+                ch for ch, var in self.channel_vars.items() if bool(var.get())
+            }
 
             for ch, (x, y, measurements, info) in frames.items():
+                if ch not in selected_channels:
+                    continue
+
                 self.waveforms[ch] = (x, y)
                 if measurements is not None:
                     self.measurements[ch] = measurements
@@ -2364,6 +2460,24 @@ class MSO4ScopeApp:
                     self.status_var.set(f"Error: {description}")
                     messagebox.showwarning(description, error)
 
+                elif kind == "channel_selection_applied":
+                    _, active, resume = msg
+                    self.status_var.set(
+                        "Channels: " + (", ".join(active) if active else "none")
+                    )
+                    if resume and active and self.client and self.client.connected:
+                        self.root.after(40, self._start_acquisition)
+                    else:
+                        self._redraw_scope()
+
+                elif kind == "stack4_ready":
+                    _, resume = msg
+                    self.status_var.set("CH1–CH4 configured")
+                    if resume and self.client and self.client.connected:
+                        self.root.after(40, self._start_acquisition)
+                    else:
+                        self._redraw_scope()
+
                 elif kind == "prepared":
                     record = msg[1]
                     if record:
@@ -2518,23 +2632,35 @@ class MSO4ScopeApp:
             self.channel_vars[ch].set(True)
             self.channel_position_vars[ch].set(f"{pos:g}")
 
+        was_running = bool(self.acq_thread and self.acq_thread.is_alive())
+        if was_running:
+            self._stop_acquisition(local_only=True)
+
+        # Remove any old traces so all four lanes wait for fresh data.
+        with self.frame_lock:
+            self.latest_frames.clear()
+        self.waveforms.clear()
         self._redraw_scope()
 
-        if self.client and self.client.connected:
-            def command() -> None:
+        if not self.client or not self.client.connected:
+            return
+
+        self.status_var.set("Configuring CH1–CH4...")
+
+        def worker() -> None:
+            try:
+                # Configure state + vertical positions in one serialized worker.
                 for ch, pos in positions.items():
                     self.client.set_channel_state(ch, True)
                     self.client.set_channel_position(ch, pos)
 
-            self._run_async(
-                "4CH STACK applied on MSO44B",
-                command,
-                refresh_settings=True,
-            )
+                self.command_queue.put(("stack4_ready", was_running))
+            except Exception as exc:
+                self.command_queue.put(
+                    ("command_error", "4CH STACK", str(exc))
+                )
 
-        if self.acq_thread and self.acq_thread.is_alive():
-            self._stop_acquisition(local_only=True)
-            self.root.after(120, self._start_acquisition)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _center_selected_channel(self) -> None:
         ch = self._selected_channel
