@@ -134,6 +134,12 @@ class MSO4ScopeApp:
         self.channel_coupling_vars = {
             ch: tk.StringVar(value="DC") for ch in CHANNEL_COLORS
         }
+        self.channel_badge_vars = {
+            ch: tk.StringVar(value=f"{ch}  1 V/div") for ch in CHANNEL_COLORS
+        }
+        self.channel_badge_labels: dict[str, tk.Label] = {}
+        self.time_badge_var = tk.StringVar(value="M  1 ms/div")
+        self.trigger_badge_var = tk.StringVar(value="T  CH1  0 V  @ 50%")
 
         self.time_scale_var = tk.StringVar(value="1 ms/div")
         self.horizontal_position_var = tk.StringVar(value="50")
@@ -654,8 +660,9 @@ class MSO4ScopeApp:
             highlightthickness=1,
         )
 
-        info = tk.Frame(frame, bg="#080D12")
+        info = tk.Frame(frame, bg="#080D12", height=34)
         info.pack(fill="x")
+        info.pack_propagate(False)
 
         tk.Label(
             info,
@@ -663,42 +670,36 @@ class MSO4ScopeApp:
             bg="#080D12",
             fg="#8FA3B8",
             anchor="w",
-        ).pack(side="left", fill="x", expand=True, padx=6, pady=4)
+            font=("Menlo", 8),
+        ).pack(side="left", fill="x", expand=True, padx=8)
 
         ttk.Button(
             info,
             text="4CH STACK",
             command=self._stack_four_channels,
             style="Accent.TButton",
-        ).pack(side="right", padx=3)
+        ).pack(side="right", padx=(2, 5), pady=3)
 
         ttk.Button(
             info,
             text="CENTER CH",
             command=self._center_selected_channel,
             style="Dark.TButton",
-        ).pack(side="right", padx=3)
+        ).pack(side="right", padx=2, pady=3)
 
         ttk.Button(
             info,
-            text="AUTO SCALE",
+            text="SCOPE VIEW",
             command=self._autoscale,
             style="Action.TButton",
-        ).pack(side="right", padx=3)
+        ).pack(side="right", padx=2, pady=3)
 
         ttk.Button(
             info,
             text="SAVE CSV",
             command=self._save_csv,
             style="Dark.TButton",
-        ).pack(side="right", padx=3)
-
-        ttk.Button(
-            info,
-            text="SCREENSHOT",
-            command=self._save_screenshot,
-            style="Dark.TButton",
-        ).pack(side="right", padx=3)
+        ).pack(side="right", padx=2, pady=3)
 
         self.canvas = tk.Canvas(
             frame,
@@ -713,13 +714,58 @@ class MSO4ScopeApp:
         self.canvas.bind("<Button-4>", self._on_scope_wheel)
         self.canvas.bind("<Button-5>", self._on_scope_wheel)
 
+        footer = tk.Frame(frame, bg="#080D12", height=42)
+        footer.pack(fill="x")
+        footer.pack_propagate(False)
+
+        channel_bar = tk.Frame(footer, bg="#080D12")
+        channel_bar.pack(side="left", padx=5, pady=5)
+
+        for ch, color in CHANNEL_COLORS.items():
+            label = tk.Label(
+                channel_bar,
+                textvariable=self.channel_badge_vars[ch],
+                bg="#111922",
+                fg=color,
+                font=("Menlo", 8, "bold"),
+                padx=6,
+                pady=4,
+                relief="flat",
+            )
+            label.pack(side="left", padx=2)
+            label.bind("<Button-1>", lambda _e, c=ch: self._select_channel(c))
+            self.channel_badge_labels[ch] = label
+
         tk.Label(
-            frame,
+            footer,
             textvariable=self.cursor_var,
             bg="#080D12",
-            fg="#93A0AD",
-            anchor="w",
-        ).pack(fill="x", padx=6, pady=3)
+            fg="#718294",
+            font=("Menlo", 8),
+        ).pack(side="left", fill="x", expand=True, padx=8)
+
+        time_bar = tk.Frame(footer, bg="#080D12")
+        time_bar.pack(side="right", padx=5, pady=5)
+
+        tk.Label(
+            time_bar,
+            textvariable=self.time_badge_var,
+            bg="#13202B",
+            fg="#E3EBF2",
+            font=("Menlo", 8, "bold"),
+            padx=7,
+            pady=4,
+        ).pack(side="left", padx=2)
+
+        tk.Label(
+            time_bar,
+            textvariable=self.trigger_badge_var,
+            bg="#2A2111",
+            fg="#F6B94A",
+            font=("Menlo", 8, "bold"),
+            padx=7,
+            pady=4,
+        ).pack(side="left", padx=2)
 
         return frame
 
@@ -886,7 +932,7 @@ class MSO4ScopeApp:
 
         tk.Label(
             outer,
-            text="Wheel: move selected CH | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div",
+            text="Wheel: CH Position | Shift+Wheel: V/div | Ctrl/Cmd+Wheel: Time/div",
             bg="#0E151D",
             fg="#708090",
             font=("Arial", 8),
@@ -1427,51 +1473,50 @@ class MSO4ScopeApp:
         self.root.after(30, self._render_latest_frames)
 
     def _autoscale(self) -> None:
-        xs = []
-        ys = []
-
-        for ch, (x, y) in self.waveforms.items():
-            if self.channel_vars[ch].get() and len(x) and len(y):
-                xs.append(x)
-                ys.append(y)
-
-        if not xs or not ys:
-            self.x_range = None
-            self.y_range = None
-            self._redraw_scope()
-            return
-
-        xmin = min(float(np.min(x)) for x in xs)
-        xmax = max(float(np.max(x)) for x in xs)
-        ymin = min(float(np.min(y)) for y in ys)
-        ymax = max(float(np.max(y)) for y in ys)
-
-        if xmax <= xmin:
-            xmax = xmin + 1.0
-
-        if ymax <= ymin:
-            pad = max(abs(ymax), 0.01) * 0.1
-            ymin -= pad
-            ymax += pad
-        else:
-            pad = (ymax - ymin) * 0.08
-            ymin -= pad
-            ymax += pad
-
-        self.x_range = (xmin, xmax)
-        self.y_range = (ymin, ymax)
+        """Return to the real oscilloscope scale instead of arbitrary local fitting."""
+        self.display_offset_div = {ch: 0.0 for ch in CHANNEL_COLORS}
+        if self.client and self.client.connected:
+            self._refresh_settings()
+        self.status_var.set("SCOPE VIEW: 10 horizontal div × 8 vertical div")
         self._redraw_scope()
+
+    @staticmethod
+    def _safe_float(value: str, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _scope_geometry(self, width: int, height: int) -> dict[str, float]:
+        left = 5.0
+        right = max(left + 10.0, float(width) - 5.0)
+        top = 5.0
+        bottom = max(top + 8.0, float(height) - 18.0)
+        plot_w = right - left
+        plot_h = bottom - top
+        return {
+            "left": left,
+            "right": right,
+            "top": top,
+            "bottom": bottom,
+            "width": plot_w,
+            "height": plot_h,
+            "x_div": plot_w / 10.0,
+            "y_div": plot_h / 8.0,
+            "center_y": top + plot_h / 2.0,
+        }
 
     def _redraw_scope(self) -> None:
         if not hasattr(self, "canvas"):
             return
 
         c = self.canvas
-        width = max(2, c.winfo_width())
-        height = max(2, c.winfo_height())
+        width = max(20, c.winfo_width())
+        height = max(20, c.winfo_height())
+        g = self._scope_geometry(width, height)
 
         c.delete("all")
-        self._draw_grid(width, height)
+        self._draw_grid(width, height, g)
 
         active = [
             ch
@@ -1479,31 +1524,54 @@ class MSO4ScopeApp:
             if self.channel_vars[ch].get() and ch in self.waveforms
         ]
 
+        try:
+            time_div = self._parse_time_div(self.time_scale_var.get())
+        except Exception:
+            time_div = 1e-3
+        time_div = max(time_div, 1e-15)
+
+        hpos = self._safe_float(self.horizontal_position_var.get(), 50.0)
+        hpos = max(0.0, min(100.0, hpos))
+        trigger_x = g["left"] + (hpos / 100.0) * g["width"]
+
+        # Trigger-time reference, exactly matching HORIZONTAL:POSITION semantics.
+        c.create_line(
+            trigger_x,
+            g["top"],
+            trigger_x,
+            g["bottom"],
+            fill="#C88A2D",
+            width=1,
+            dash=(3, 4),
+        )
+        c.create_polygon(
+            trigger_x - 6,
+            g["top"],
+            trigger_x + 6,
+            g["top"],
+            trigger_x,
+            g["top"] + 8,
+            fill="#F1A93A",
+            outline="",
+        )
+
         if not active:
             message = (
-                "Connected - press RUN"
+                "CONNECTED • press RUN or GET DATA"
                 if self.client and self.client.connected
-                else "Connect to MSO44B"
+                else "CONNECT TO MSO44B"
             )
             c.create_text(
                 width / 2,
                 height / 2,
                 text=message,
-                fill="#586574",
-                font=("Arial", 14),
+                fill="#566778",
+                font=("Arial", 13, "bold"),
             )
+            self._update_scope_badges()
             return
 
-        if self.x_range is None or self.y_range is None:
-            return
-
-        xmin, xmax = self.x_range
-        ymin, ymax = self.y_range
-        xspan = max(xmax - xmin, 1e-15)
-        yspan = max(ymax - ymin, 1e-15)
-
-        # No point drawing more than ~2 samples per horizontal pixel.
-        max_draw_points = max(500, min(5000, width * 2))
+        max_draw_points = max(500, min(5000, int(g["width"] * 2)))
 
         for ch in active:
             x, y = self.waveforms[ch]
@@ -1523,96 +1591,257 @@ class MSO4ScopeApp:
                 xd = x
                 yd = y
 
-            xp = (xd - xmin) / xspan * width
-            yp = height - (yd - ymin) / yspan * height
-            yp = yp - self.display_offset_div.get(ch, 0.0) * (height / 8.0)
+            try:
+                volts_div = self._parse_vdiv(self.channel_scale_vars[ch].get())
+            except Exception:
+                volts_div = 1.0
+            volts_div = max(abs(volts_div), 1e-15)
+
+            position_div = self._safe_float(
+                self.channel_position_vars[ch].get(),
+                0.0,
+            )
+            offset_v = self._safe_float(
+                self.channel_offset_vars[ch].get(),
+                0.0,
+            )
+
+            # Tek-style graticule:
+            # 1 horizontal box = time_div seconds.
+            # 1 vertical box = channel volts_div volts.
+            xp = trigger_x + (xd / time_div) * g["x_div"]
+            screen_div = ((yd - offset_v) / volts_div) + position_div
+            yp = g["center_y"] - screen_div * g["y_div"]
 
             coords = np.column_stack((xp, yp)).ravel().tolist()
             c.create_line(
                 *coords,
                 fill=CHANNEL_COLORS[ch],
-                width=2,
+                width=(2.4 if ch == self._selected_channel else 1.7),
                 smooth=False,
             )
 
-        self._draw_channel_markers(width, height, ymin, ymax)
-
-    def _draw_grid(self, width: int, height: int) -> None:
-        for i in range(11):
-            x = width * i / 10.0
-            color = "#45505C" if i == 5 else "#242D36"
-            self.canvas.create_line(x, 0, x, height, fill=color, width=1)
-
-        for i in range(9):
-            y = height * i / 8.0
-            color = "#45505C" if i == 4 else "#242D36"
-            self.canvas.create_line(0, y, width, y, fill=color, width=1)
-
-        for i in range(10):
-            x = width * (i + 0.5) / 10.0
-            self.canvas.create_line(
-                x,
-                height / 2 - 3,
-                x,
-                height / 2 + 3,
-                fill="#263440",
+            self._draw_channel_reference_marker(
+                ch,
+                volts_div,
+                position_div,
+                offset_v,
+                g,
             )
 
-    def _draw_channel_markers(
+        self._draw_trigger_level(g)
+        self._update_scope_badges()
+
+    def _draw_grid(
         self,
         width: int,
         height: int,
-        ymin: float,
-        ymax: float,
+        g: dict[str, float],
     ) -> None:
-        span = max(ymax - ymin, 1e-15)
+        c = self.canvas
 
-        for ch in CHANNEL_COLORS:
-            if not self.channel_vars[ch].get() or ch not in self.waveforms:
-                continue
+        c.create_rectangle(
+            g["left"],
+            g["top"],
+            g["right"],
+            g["bottom"],
+            outline="#40505E",
+            width=1,
+        )
 
-            _, y = self.waveforms[ch]
-            if len(y) == 0:
-                continue
-
-            baseline = float(np.mean(y))
-            py = height - (baseline - ymin) / span * height
-            py = py - self.display_offset_div.get(ch, 0.0) * (height / 8.0)
-            py = max(8, min(height - 8, py))
-
-            self.canvas.create_polygon(
-                0,
-                py,
-                11,
-                py - 7,
-                11,
-                py + 7,
-                fill=CHANNEL_COLORS[ch],
-                outline="",
-            )
-            self.canvas.create_text(
-                15,
-                py,
-                text=(f"{ch[-1]}*" if ch == self._selected_channel else ch[-1]),
-                fill=CHANNEL_COLORS[ch],
-                anchor="w",
-                font=("Arial", 8, "bold"),
+        # Tektronix-like 10 × 8 major graticule boxes.
+        for i in range(11):
+            x = g["left"] + i * g["x_div"]
+            major = i in {0, 5, 10}
+            c.create_line(
+                x,
+                g["top"],
+                x,
+                g["bottom"],
+                fill=("#334454" if major else "#192630"),
+                width=(1.2 if major else 1),
             )
 
-    def _on_mouse_move(self, event) -> None:
-        if self.x_range is None or self.y_range is None:
+        for i in range(9):
+            y = g["top"] + i * g["y_div"]
+            major = i in {0, 4, 8}
+            c.create_line(
+                g["left"],
+                y,
+                g["right"],
+                y,
+                fill=("#334454" if major else "#192630"),
+                width=(1.2 if major else 1),
+            )
+
+        # Minor center-axis ticks make each box easier to read without clutter.
+        center_x = g["left"] + 5 * g["x_div"]
+        center_y = g["top"] + 4 * g["y_div"]
+        for i in range(1, 40):
+            if i % 5 == 0:
+                continue
+            y = g["top"] + i * (g["y_div"] / 5.0)
+            c.create_line(center_x - 2, y, center_x + 2, y, fill="#40505E")
+        for i in range(1, 50):
+            if i % 5 == 0:
+                continue
+            x = g["left"] + i * (g["x_div"] / 5.0)
+            c.create_line(x, center_y - 2, x, center_y + 2, fill="#40505E")
+
+        c.create_text(
+            g["right"] - 5,
+            g["bottom"] + 10,
+            text="10 DIV × 8 DIV",
+            fill="#526474",
+            anchor="e",
+            font=("Menlo", 7),
+        )
+
+    def _draw_channel_reference_marker(
+        self,
+        ch: str,
+        volts_div: float,
+        position_div: float,
+        offset_v: float,
+        g: dict[str, float],
+    ) -> None:
+        # Marker represents 0 V on the active channel's own V/div scale.
+        zero_div = ((0.0 - offset_v) / volts_div) + position_div
+        py = g["center_y"] - zero_div * g["y_div"]
+        if py < g["top"] - 10 or py > g["bottom"] + 10:
             return
 
-        width = max(1, self.canvas.winfo_width())
-        height = max(1, self.canvas.winfo_height())
-        xmin, xmax = self.x_range
-        ymin, ymax = self.y_range
+        color = CHANNEL_COLORS[ch]
+        self.canvas.create_polygon(
+            g["left"],
+            py,
+            g["left"] + 11,
+            py - 7,
+            g["left"] + 11,
+            py + 7,
+            fill=color,
+            outline="",
+        )
+        self.canvas.create_text(
+            g["left"] + 14,
+            py,
+            text=(f"{ch}*" if ch == self._selected_channel else ch),
+            fill=color,
+            anchor="w",
+            font=("Arial", 7, "bold"),
+        )
 
-        t = xmin + (event.x / width) * (xmax - xmin)
-        v = ymax - (event.y / height) * (ymax - ymin)
+    def _draw_trigger_level(self, g: dict[str, float]) -> None:
+        source = self.trigger_source_var.get().strip().upper()
+        if source not in CHANNEL_COLORS or not self.channel_vars[source].get():
+            return
+
+        try:
+            scale = self._parse_vdiv(self.channel_scale_vars[source].get())
+        except Exception:
+            scale = 1.0
+        scale = max(abs(scale), 1e-15)
+
+        position = self._safe_float(
+            self.channel_position_vars[source].get(),
+            0.0,
+        )
+        offset_v = self._safe_float(
+            self.channel_offset_vars[source].get(),
+            0.0,
+        )
+        level = self._safe_float(self.trigger_level_var.get(), 0.0)
+
+        trigger_div = ((level - offset_v) / scale) + position
+        py = g["center_y"] - trigger_div * g["y_div"]
+        if py < g["top"] or py > g["bottom"]:
+            return
+
+        self.canvas.create_line(
+            g["left"],
+            py,
+            g["right"],
+            py,
+            fill="#7A5825",
+            width=1,
+            dash=(2, 5),
+        )
+        self.canvas.create_polygon(
+            g["right"],
+            py,
+            g["right"] - 10,
+            py - 6,
+            g["right"] - 10,
+            py + 6,
+            fill="#F1A93A",
+            outline="",
+        )
+        self.canvas.create_text(
+            g["right"] - 13,
+            py,
+            text="T",
+            fill="#F1A93A",
+            anchor="e",
+            font=("Arial", 7, "bold"),
+        )
+
+    def _update_scope_badges(self) -> None:
+        for ch, color in CHANNEL_COLORS.items():
+            scale_text = self.channel_scale_vars[ch].get()
+            position = self.channel_position_vars[ch].get()
+            self.channel_badge_vars[ch].set(
+                f"{ch}  {scale_text}  P{position}"
+            )
+
+            label = self.channel_badge_labels.get(ch)
+            if label is not None:
+                enabled = self.channel_vars[ch].get()
+                selected = ch == self._selected_channel
+                label.configure(
+                    fg=(color if enabled else "#52606D"),
+                    bg=("#1A2632" if selected else "#111922"),
+                    relief=("solid" if selected else "flat"),
+                    bd=(1 if selected else 0),
+                )
+
+        self.time_badge_var.set(
+            f"M  {self.time_scale_var.get()}  •  10 div"
+        )
+        source = self.trigger_source_var.get().strip().upper()
+        level = self.trigger_level_var.get()
+        position = self.horizontal_position_var.get()
+        self.trigger_badge_var.set(
+            f"T  {source}  {level} V  @ {position}%"
+        )
+
+    def _on_mouse_move(self, event) -> None:
+        width = max(20, self.canvas.winfo_width())
+        height = max(20, self.canvas.winfo_height())
+        g = self._scope_geometry(width, height)
+
+        try:
+            time_div = self._parse_time_div(self.time_scale_var.get())
+        except Exception:
+            time_div = 1e-3
+
+        hpos = self._safe_float(self.horizontal_position_var.get(), 50.0)
+        hpos = max(0.0, min(100.0, hpos))
+        trigger_x = g["left"] + (hpos / 100.0) * g["width"]
+        t = ((event.x - trigger_x) / g["x_div"]) * time_div
+
+        ch = self._selected_channel
+        try:
+            volts_div = self._parse_vdiv(self.channel_scale_vars[ch].get())
+        except Exception:
+            volts_div = 1.0
+        position = self._safe_float(self.channel_position_vars[ch].get(), 0.0)
+        offset_v = self._safe_float(self.channel_offset_vars[ch].get(), 0.0)
+
+        screen_div = (g["center_y"] - event.y) / g["y_div"]
+        v = (screen_div - position) * volts_div + offset_v
 
         self.cursor_var.set(
-            f"t = {self._format_time(t)}    V = {self._format_voltage(v)}"
+            f"{ch}  t={self._format_time(t)}   V={self._format_voltage(v)}"
         )
 
     # ------------------------------------------------------------------
@@ -1779,6 +2008,9 @@ class MSO4ScopeApp:
                     if coupling in {"DC", "AC"}:
                         self.channel_coupling_vars[ch].set(coupling)
 
+        if hasattr(self, "canvas"):
+            self._redraw_scope()
+
     def _select_channel(self, channel: str) -> None:
         if channel in CHANNEL_COLORS:
             self._selected_channel = channel
@@ -1795,38 +2027,46 @@ class MSO4ScopeApp:
             self._redraw_scope()
 
     def _stack_four_channels(self) -> None:
-        # Four local display lanes. These offsets do not modify waveform values.
-        offsets = {
+        positions = {
             "CH1": 3.0,
             "CH2": 1.0,
             "CH3": -1.0,
             "CH4": -3.0,
         }
-        self.display_offset_div.update(offsets)
 
-        for ch in CHANNEL_COLORS:
+        for ch, pos in positions.items():
             self.channel_vars[ch].set(True)
+            self.channel_position_vars[ch].set(f"{pos:g}")
+
+        self._redraw_scope()
 
         if self.client and self.client.connected:
             def command() -> None:
-                for ch in CHANNEL_COLORS:
+                for ch, pos in positions.items():
                     self.client.set_channel_state(ch, True)
+                    self.client.set_channel_position(ch, pos)
 
-            self._run_async("4CH enabled", command)
+            self._run_async(
+                "4CH STACK applied on MSO44B",
+                command,
+                refresh_settings=True,
+            )
 
         if self.acq_thread and self.acq_thread.is_alive():
             self._stop_acquisition(local_only=True)
-            self.root.after(100, self._start_acquisition)
-        else:
-            self._redraw_scope()
-
-        self.status_var.set("4CH STACK: CH1 +3, CH2 +1, CH3 -1, CH4 -3 div")
+            self.root.after(120, self._start_acquisition)
 
     def _center_selected_channel(self) -> None:
         ch = self._selected_channel
-        self.display_offset_div[ch] = 0.0
-        self.status_var.set(f"{ch} display centered")
+        self.channel_position_vars[ch].set("0")
         self._redraw_scope()
+
+        if self.client and self.client.connected:
+            self._run_async(
+                f"{ch} position 0 div",
+                lambda: self.client.set_channel_position(ch, 0.0),
+                refresh_settings=True,
+            )
 
     @staticmethod
     def _wheel_direction(event) -> int:
@@ -1850,15 +2090,10 @@ class MSO4ScopeApp:
 
         state = int(getattr(event, "state", 0))
         shift = bool(state & 0x0001)
-        # Tk maps Ctrl/Command to different modifier masks by platform.
         time_modifier = bool(state & (0x0004 | 0x0008 | 0x0010 | 0x0040))
-
         ch = self._selected_channel
 
         if shift:
-            if not self.client or not self.client.connected:
-                return "break"
-
             try:
                 current = self._parse_vdiv(self.channel_scale_vars[ch].get())
             except Exception:
@@ -1871,12 +2106,12 @@ class MSO4ScopeApp:
             idx = max(0, min(len(VERTICAL_SCALES) - 1, idx - direction))
             new_value = VERTICAL_SCALES[idx]
             self.channel_scale_vars[ch].set(self._format_vdiv(new_value))
-            self._schedule_wheel_apply("vertical", ch, new_value)
+            self._redraw_scope()
+
+            if self.client and self.client.connected:
+                self._schedule_wheel_apply("vertical", ch, new_value)
 
         elif time_modifier:
-            if not self.client or not self.client.connected:
-                return "break"
-
             try:
                 current = self._parse_time_div(self.time_scale_var.get())
             except Exception:
@@ -1889,18 +2124,22 @@ class MSO4ScopeApp:
             idx = max(0, min(len(TIME_SCALES) - 1, idx - direction))
             new_value = TIME_SCALES[idx]
             self.time_scale_var.set(self._format_time_div(new_value))
-            self._schedule_wheel_apply("horizontal", None, new_value)
+            self._redraw_scope()
+
+            if self.client and self.client.connected:
+                self._schedule_wheel_apply("horizontal", None, new_value)
 
         else:
-            # Local display-only move: raw oscilloscope waveform data is untouched.
-            current = self.display_offset_div.get(ch, 0.0)
-            current += direction * 0.25
-            current = max(-4.0, min(4.0, current))
-            self.display_offset_div[ch] = current
-            self.status_var.set(
-                f"{ch} display position: {current:+.2f} div"
+            current = self._safe_float(
+                self.channel_position_vars[ch].get(),
+                0.0,
             )
+            new_position = max(-5.0, min(5.0, current + direction * 0.25))
+            self.channel_position_vars[ch].set(f"{new_position:.2f}")
             self._redraw_scope()
+
+            if self.client and self.client.connected:
+                self._schedule_wheel_apply("position", ch, new_position)
 
         return "break"
 
@@ -1930,6 +2169,12 @@ class MSO4ScopeApp:
                 self._run_async(
                     f"Time/div {self._format_time_div(value)}",
                     lambda: self.client.set_horizontal_scale(value),
+                    refresh_settings=True,
+                )
+            elif kind == "position" and channel:
+                self._run_async(
+                    f"{channel} position {value:+.2f} div",
+                    lambda: self.client.set_channel_position(channel, value),
                     refresh_settings=True,
                 )
 
