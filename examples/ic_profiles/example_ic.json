@@ -1,0 +1,22 @@
+{
+  "name": "Example IC A",
+  "revision": "A0",
+  "rails": {
+    "vdd": 1.2,
+    "vio": 1.8
+  },
+  "scope": {
+    "clock_channel": "CH1",
+    "data_channel": "CH2",
+    "clock_vdiv": 0.2,
+    "time_div": 1e-6
+  },
+  "limits": {
+    "clock_frequency_min_hz": 900000,
+    "clock_frequency_max_hz": 1100000,
+    "supply_current_max_a": 0.25
+  },
+  "timing": {
+    "power_settle_s": 0.2
+  }
+}
